@@ -56,6 +56,36 @@ class RagService:
             return None
         return None
 
+    def _search_collection(
+        self,
+        *,
+        client: QdrantClient,
+        collection: str,
+        vector: list[float],
+    ) -> list[Any]:
+        if hasattr(client, "search"):
+            hits = client.search(
+                collection_name=collection,
+                query_vector=vector,
+                with_payload=True,
+                limit=self.top_k,
+            )
+            return list(hits)
+
+        if hasattr(client, "query_points"):
+            response = client.query_points(
+                collection_name=collection,
+                query=vector,
+                with_payload=True,
+                limit=self.top_k,
+            )
+            points = getattr(response, "points", response)
+            return list(points) if points is not None else []
+
+        raise AttributeError(
+            "Qdrant client has neither 'search' nor 'query_points'; unsupported version."
+        )
+
     async def retrieve(
         self, query: str, enabled_collections: list[str] | None = None
     ) -> list[ContextChunk]:
@@ -82,13 +112,16 @@ class RagService:
         out: list[ContextChunk] = []
         for collection in target_collections:
             try:
-                hits = client.search(
-                    collection_name=collection,
-                    query_vector=vector,
-                    with_payload=True,
-                    limit=self.top_k,
+                hits = self._search_collection(
+                    client=client,
+                    collection=collection,
+                    vector=vector,
                 )
-                logger.info("Qdrant search succeeded for %s with %d hits", collection, len(hits))
+                logger.info(
+                    "Qdrant search succeeded for %s with %d hits",
+                    collection,
+                    len(hits),
+                )
             except Exception as exc:
                 logger.exception("Qdrant search failed for %s: %s", collection, exc)
                 continue

@@ -249,7 +249,7 @@ async function loadTopics() {
     }
     const data = await response.json();
     const topics = data.all_topics || [];
-    topics.slice(0, 50).forEach((topic) => {
+    topics.forEach((topic) => {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = topic;

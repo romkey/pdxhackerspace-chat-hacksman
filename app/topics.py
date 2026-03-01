@@ -29,19 +29,32 @@ def _to_topic_strings(values: Any) -> list[str]:
     return out
 
 
+def _unique_sorted(values: list[str]) -> list[str]:
+    deduped: dict[str, str] = {}
+    for value in values:
+        key = value.casefold().strip()
+        if not key:
+            continue
+        if key not in deduped:
+            deduped[key] = value.strip()
+    return sorted(deduped.values(), key=lambda item: item.casefold())
+
+
 def parse_topics_payload(payload: Any) -> dict[str, list[str]]:
     if not isinstance(payload, dict):
         return {"interests": [], "training_topics": [], "all_topics": []}
 
     interests = _to_topic_strings(payload.get("interests", []))
-    training_topics = _to_topic_strings(payload.get("training_topics", []))
+    training_topics = _to_topic_strings(
+        payload.get("training_topics", payload.get("trainingTopics", []))
+    )
 
     if not interests and not training_topics:
         # Flexible fallback for unknown payloads.
-        fallback = _to_topic_strings(payload.get("topics", []))
+        fallback = _unique_sorted(_to_topic_strings(payload.get("topics", [])))
         return {"interests": fallback, "training_topics": [], "all_topics": fallback}
 
-    all_topics = list(dict.fromkeys(interests + training_topics))
+    all_topics = _unique_sorted(interests + training_topics)
     return {
         "interests": interests,
         "training_topics": training_topics,
