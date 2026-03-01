@@ -4,6 +4,7 @@ Web-based chatbot with:
 
 - Optional RAG from up to 3 Qdrant collections (or none, if unset).
 - Configurable prompt/model/provider in the UI, persisted across runs.
+- Per-collection Qdrant enable/disable checkboxes in the UI, persisted across runs.
 - Topic buttons loaded from a JSON feed (default: `https://members.pdxhackerspace.org/rag.json`).
 - Ollama and llama.cpp-compatible chat modes.
 - History tracking for settings snapshot, prompt, question, and response.
@@ -36,6 +37,7 @@ See `.env.example`. Key vars:
 - `RAG_TOPICS_URL` for topic feed buttons.
 - `DEFAULT_PROVIDER` (`ollama` or `llama_cpp`).
 - `DEFAULT_LLM_BASE_URL`, `DEFAULT_MODEL`, `DEFAULT_SYSTEM_PROMPT`.
+- `LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, ...).
 
 If Qdrant collections are not configured or embedding lookup fails, RAG is skipped gracefully.
 

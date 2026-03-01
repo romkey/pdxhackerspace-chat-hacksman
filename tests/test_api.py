@@ -35,8 +35,9 @@ def test_settings_round_trip() -> None:
 
 
 def test_chat_endpoint_records_history(monkeypatch) -> None:
-    async def fake_retrieve(self, _: str):  # noqa: ANN001
+    async def fake_retrieve(self, _: str, enabled_collections=None):  # noqa: ANN001
         del self
+        del enabled_collections
         return [
             ContextChunk(
                 collection="docs",

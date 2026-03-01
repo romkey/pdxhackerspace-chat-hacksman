@@ -59,6 +59,8 @@ class Storage:
             if not row:
                 return self.default_settings
             payload = json.loads(row["payload_json"])
+            if "enabled_rag_collections" not in payload:
+                payload["enabled_rag_collections"] = self.default_settings.enabled_rag_collections
             return AppSettings.model_validate(payload)
 
     def save_settings(self, settings: AppSettings) -> AppSettings:

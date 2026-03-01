@@ -25,6 +25,7 @@ class AppConfig:
     default_llm_base_url: str
     default_model: str
     default_system_prompt: str
+    log_level: str
 
 
 def load_config() -> AppConfig:
@@ -56,4 +57,5 @@ def load_config() -> AppConfig:
             "DEFAULT_SYSTEM_PROMPT",
             "You are Chat Hacksman, an expert assistant for hackerspace members.",
         ),
+        log_level=os.getenv("LOG_LEVEL", "INFO"),
     )

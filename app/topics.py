@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 def _to_topic_strings(values: Any) -> list[str]:
@@ -56,8 +59,14 @@ class TopicsService:
     async def get_topics(self) -> dict[str, list[str]]:
         now = monotonic()
         if self._cache_data is not None and now < self._cache_expires_at:
+            logger.info(
+                "Using cached topics payload (interests=%d, training_topics=%d)",
+                len(self._cache_data["interests"]),
+                len(self._cache_data["training_topics"]),
+            )
             return self._cache_data
 
+        logger.info("Fetching topics feed from %s", self.topics_url)
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(self.topics_url)
             response.raise_for_status()
@@ -66,4 +75,10 @@ class TopicsService:
         parsed = parse_topics_payload(payload)
         self._cache_data = parsed
         self._cache_expires_at = now + max(1, self.ttl_seconds)
+        logger.info(
+            "Loaded topics feed (interests=%d, training_topics=%d, all=%d)",
+            len(parsed["interests"]),
+            len(parsed["training_topics"]),
+            len(parsed["all_topics"]),
+        )
         return parsed

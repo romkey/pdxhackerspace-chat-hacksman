@@ -22,6 +22,7 @@ class AppSettings(BaseModel):
     llm_base_url: str = "http://localhost:11434"
     model: str = "llama3.2:latest"
     system_prompt: str
+    enabled_rag_collections: list[str] = Field(default_factory=list)
     tweaks: ProviderTweaks = Field(default_factory=ProviderTweaks)
 
 
@@ -30,7 +31,13 @@ class SettingsUpdate(BaseModel):
     llm_base_url: str
     model: str
     system_prompt: str
+    enabled_rag_collections: list[str] = Field(default_factory=list)
     tweaks: ProviderTweaks
+
+
+class RagCollectionsResponse(BaseModel):
+    available_collections: list[str]
+    enabled_collections: list[str]
 
 
 class ContextChunk(BaseModel):

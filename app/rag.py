@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -7,6 +8,8 @@ import httpx
 from qdrant_client import QdrantClient
 
 from app.models import ContextChunk
+
+logger = logging.getLogger(__name__)
 
 
 def _extract_chunk_text(payload: dict[str, Any]) -> str:
@@ -31,6 +34,11 @@ class RagService:
 
     async def _embed_query(self, query: str) -> list[float] | None:
         try:
+            logger.info(
+                "Creating embedding for query using model=%s at %s",
+                self.embedding_model,
+                self.embedding_url,
+            )
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
                     f"{self.embedding_url.rstrip('/')}/api/embeddings",
@@ -40,21 +48,39 @@ class RagService:
                 data = response.json()
             embedding = data.get("embedding")
             if isinstance(embedding, list) and embedding:
+                logger.info("Embedding generated successfully with %d dimensions", len(embedding))
                 return [float(x) for x in embedding]
-        except Exception:
+            logger.warning("Embedding response had no usable vector payload")
+        except Exception as exc:
+            logger.exception("Embedding request failed: %s", exc)
             return None
         return None
 
-    async def retrieve(self, query: str) -> list[ContextChunk]:
-        if not self.collections:
+    async def retrieve(
+        self, query: str, enabled_collections: list[str] | None = None
+    ) -> list[ContextChunk]:
+        target_collections = (
+            enabled_collections if enabled_collections is not None else self.collections
+        )
+        available_set = set(self.collections)
+        target_collections = [
+            collection for collection in target_collections if collection in available_set
+        ]
+        if not target_collections:
+            logger.info("Skipping RAG retrieval because no collections are enabled")
             return []
+        logger.info(
+            "Running RAG retrieval across collections=%s",
+            ",".join(target_collections),
+        )
         vector = await self._embed_query(query)
         if vector is None:
+            logger.warning("Skipping RAG retrieval because query embedding failed")
             return []
 
         client = self._make_qdrant_client()
         out: list[ContextChunk] = []
-        for collection in self.collections:
+        for collection in target_collections:
             try:
                 hits = client.search(
                     collection_name=collection,
@@ -62,7 +88,9 @@ class RagService:
                     with_payload=True,
                     limit=self.top_k,
                 )
-            except Exception:
+                logger.info("Qdrant search succeeded for %s with %d hits", collection, len(hits))
+            except Exception as exc:
+                logger.exception("Qdrant search failed for %s: %s", collection, exc)
                 continue
 
             for hit in hits:
@@ -80,4 +108,5 @@ class RagService:
                 )
 
         out.sort(key=lambda item: item.score, reverse=True)
+        logger.info("RAG retrieval produced %d usable chunks", len(out[: self.top_k]))
         return out[: self.top_k]

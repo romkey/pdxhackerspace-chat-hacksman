@@ -16,7 +16,8 @@
       .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
       #topic-buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; }
       #topic-buttons button { background: #374151; border-color: #4b5563; }
-      #response, #history { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+      #rag-collections { display: grid; gap: 0.25rem; margin-bottom: 0.7rem; }
+      #response, #history, #diagnostics { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
       .muted { color: #9ca3af; font-size: 0.85rem; }
       @media (max-width: 900px) { .container { grid-template-columns: 1fr; } }
     </style>
@@ -79,6 +80,8 @@
           <button id="save-settings">Save Settings</button>
           <button id="refresh-topics" type="button">Refresh Topics</button>
         </div>
+        <h4>Qdrant Collections</h4>
+        <div id="rag-collections" class="muted"></div>
         <p class="muted" id="status"></p>
       </section>
 
@@ -98,6 +101,11 @@
         <div id="response"></div>
         <h4>History</h4>
         <div id="history"></div>
+        <div class="row">
+          <h4>Diagnostics</h4>
+          <button id="copy-diagnostics" type="button">Copy Diagnostics</button>
+        </div>
+        <div id="diagnostics"></div>
       </section>
     </div>
     <script src="/static/app.js"></script>
