@@ -1,0 +1,34 @@
+services:
+  chat-hacksman:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: chat-hacksman:local
+    container_name: chat-hacksman
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      CHAT_HACKSMAN_DB_PATH: /app-data/chat_hacksman.db
+      # Configure one or many Qdrant collections:
+      # RAG_COLLECTIONS: "members_docs,training_docs"
+      # Or:
+      # RAG_COLLECTION_1: "members_docs"
+      # RAG_COLLECTION_2: "training_docs"
+      # RAG_COLLECTION_3: "wiki_docs"
+    volumes:
+      - chat-hacksman-data:/app-data
+    restart: unless-stopped
+
+  # Optional local Qdrant service if you do not already run one.
+  # qdrant:
+  #   image: qdrant/qdrant:latest
+  #   ports:
+  #     - "6333:6333"
+  #   volumes:
+  #     - qdrant-data:/qdrant/storage
+
+volumes:
+  chat-hacksman-data:
+  # qdrant-data:

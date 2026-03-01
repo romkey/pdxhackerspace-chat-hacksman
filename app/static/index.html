@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chat Hacksman</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; background: #111827; color: #f3f4f6; }
+      .container { max-width: 1200px; margin: 0 auto; padding: 1rem; display: grid; gap: 1rem; grid-template-columns: 360px 1fr; }
+      .card { background: #1f2937; border-radius: 8px; padding: 1rem; }
+      .field { display: grid; gap: 0.35rem; margin-bottom: 0.7rem; }
+      label { font-size: 0.9rem; color: #d1d5db; }
+      input, select, textarea, button { border-radius: 6px; border: 1px solid #4b5563; background: #111827; color: #f3f4f6; padding: 0.5rem; }
+      textarea { min-height: 100px; resize: vertical; }
+      button { cursor: pointer; background: #2563eb; border-color: #2563eb; }
+      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+      #topic-buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+      #topic-buttons button { background: #374151; border-color: #4b5563; }
+      #response, #history { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+      .muted { color: #9ca3af; font-size: 0.85rem; }
+      @media (max-width: 900px) { .container { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <section class="card">
+        <h2>Chat Hacksman</h2>
+        <div class="field">
+          <label for="provider">Provider</label>
+          <select id="provider">
+            <option value="ollama">Ollama</option>
+            <option value="llama_cpp">llama.cpp</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="llm-base-url">LLM Base URL</label>
+          <input id="llm-base-url" />
+        </div>
+        <div class="field">
+          <label for="model">Model</label>
+          <input id="model" />
+        </div>
+        <div class="field">
+          <label for="system-prompt">System Prompt (remembered)</label>
+          <textarea id="system-prompt"></textarea>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label for="temperature">Temperature</label>
+            <input id="temperature" type="number" step="0.01" min="0" max="2" />
+          </div>
+          <div class="field">
+            <label for="top-p">Top P</label>
+            <input id="top-p" type="number" step="0.01" min="0" max="1" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="max-tokens">Max Tokens</label>
+            <input id="max-tokens" type="number" min="1" max="4096" />
+          </div>
+          <div class="field">
+            <label for="repeat-penalty">Repeat Penalty</label>
+            <input id="repeat-penalty" type="number" step="0.01" min="0" max="3" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="field" id="num-ctx-field">
+            <label for="num-ctx">Ollama Num Context</label>
+            <input id="num-ctx" type="number" min="256" max="32768" />
+          </div>
+          <div class="field" id="seed-field">
+            <label for="seed">llama.cpp Seed (optional)</label>
+            <input id="seed" type="number" />
+          </div>
+        </div>
+        <div class="row">
+          <button id="save-settings">Save Settings</button>
+          <button id="refresh-topics" type="button">Refresh Topics</button>
+        </div>
+        <p class="muted" id="status"></p>
+      </section>
+
+      <section class="card">
+        <h3>Interest & Training Topic Buttons</h3>
+        <div id="topic-buttons"></div>
+        <hr />
+        <div class="field">
+          <label for="question">Question</label>
+          <textarea id="question"></textarea>
+        </div>
+        <div class="row">
+          <button id="ask">Ask</button>
+          <label class="muted"><input id="use-rag" type="checkbox" checked /> Use RAG</label>
+        </div>
+        <h4>Response</h4>
+        <div id="response"></div>
+        <h4>History</h4>
+        <div id="history"></div>
+      </section>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+  </html>

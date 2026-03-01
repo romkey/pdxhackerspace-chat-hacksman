@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+
+def _split_collections(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+@dataclass(slots=True)
+class AppConfig:
+    db_path: str
+    app_host: str
+    app_port: int
+    topics_url: str
+    topics_cache_ttl_seconds: int
+    qdrant_url: str
+    qdrant_api_key: str | None
+    rag_collections: list[str]
+    rag_top_k: int
+    embedding_url: str
+    embedding_model: str
+    default_provider: str
+    default_llm_base_url: str
+    default_model: str
+    default_system_prompt: str
+
+
+def load_config() -> AppConfig:
+    collections = _split_collections(os.getenv("RAG_COLLECTIONS", ""))
+    for key in ("RAG_COLLECTION_1", "RAG_COLLECTION_2", "RAG_COLLECTION_3"):
+        value = os.getenv(key, "").strip()
+        if value:
+            collections.append(value)
+
+    # Keep order but remove duplicates.
+    deduped_collections = list(dict.fromkeys(collections))
+
+    return AppConfig(
+        db_path=os.getenv("CHAT_HACKSMAN_DB_PATH", "./data/chat_hacksman.db"),
+        app_host=os.getenv("APP_HOST", "0.0.0.0"),
+        app_port=int(os.getenv("APP_PORT", "8000")),
+        topics_url=os.getenv("RAG_TOPICS_URL", "https://members.pdxhackerspace.org/rag.json"),
+        topics_cache_ttl_seconds=int(os.getenv("TOPICS_CACHE_TTL_SECONDS", "300")),
+        qdrant_url=os.getenv("QDRANT_URL", "http://localhost:6333"),
+        qdrant_api_key=os.getenv("QDRANT_API_KEY") or None,
+        rag_collections=deduped_collections,
+        rag_top_k=int(os.getenv("RAG_TOP_K", "4")),
+        embedding_url=os.getenv("EMBEDDING_URL", "http://localhost:11434"),
+        embedding_model=os.getenv("EMBEDDING_MODEL", "nomic-embed-text"),
+        default_provider=os.getenv("DEFAULT_PROVIDER", "ollama"),
+        default_llm_base_url=os.getenv("DEFAULT_LLM_BASE_URL", "http://localhost:11434"),
+        default_model=os.getenv("DEFAULT_MODEL", "llama3.2:latest"),
+        default_system_prompt=os.getenv(
+            "DEFAULT_SYSTEM_PROMPT",
+            "You are Chat Hacksman, an expert assistant for hackerspace members.",
+        ),
+    )

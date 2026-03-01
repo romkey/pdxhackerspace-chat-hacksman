@@ -1,0 +1,1 @@
+"""Chat Hacksman application package."""
