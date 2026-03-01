@@ -32,6 +32,7 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=sha
+            type=raw,value=latest,enable={{is_tag}}
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
