@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import tomllib
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
@@ -55,10 +56,26 @@ logger.info(
     "Configured Qdrant collections from env: %s",
     ",".join(config.rag_collections) if config.rag_collections else "(none)",
 )
-try:
-    APP_VERSION = package_version("chat-hacksman")
-except PackageNotFoundError:
-    APP_VERSION = "unknown"
+
+
+def _detect_app_version() -> str:
+    pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    try:
+        with pyproject_path.open("rb") as f:
+            pyproject_data = tomllib.load(f)
+        version = pyproject_data.get("project", {}).get("version")
+        if isinstance(version, str) and version.strip():
+            return version.strip()
+    except Exception:
+        pass
+
+    try:
+        return package_version("chat-hacksman")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+APP_VERSION = _detect_app_version()
 
 app = FastAPI(title="Chat Hacksman")
 app.add_middleware(
