@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 os.environ["CHAT_HACKSMAN_DB_PATH"] = str(Path("data/test_chat_hacksman.db"))
 
 import app.main as main_module  # noqa: E402
+from app.llm import LlmError  # noqa: E402
 from app.main import app, llm_service, rag_service  # noqa: E402
 from app.models import ContextChunk  # noqa: E402
 
@@ -183,6 +184,24 @@ def test_temporary_chat_not_saved_to_history(monkeypatch) -> None:
         history_resp = client.get("/api/history?limit=10")
         assert history_resp.status_code == 200
         assert history_resp.json() == []
+
+
+def test_chat_endpoint_returns_502_when_llm_fails(monkeypatch) -> None:
+    async def fake_retrieve(self, _: str, enabled_collections=None):  # noqa: ANN001
+        del self, enabled_collections
+        return []
+
+    async def fake_chat(self, *, settings, question, context):  # noqa: ANN001
+        del self, settings, question, context
+        raise LlmError("model transport failed")
+
+    monkeypatch.setattr(type(rag_service), "retrieve", fake_retrieve)
+    monkeypatch.setattr(type(llm_service), "chat", fake_chat)
+
+    with TestClient(app) as client:
+        response = client.post("/api/chat", json={"question": "ping", "use_rag": False})
+        assert response.status_code == 502
+        assert response.json()["detail"] == "model transport failed"
 
 
 def test_models_endpoint_returns_ollama_model_list(monkeypatch) -> None:

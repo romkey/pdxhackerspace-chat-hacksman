@@ -41,6 +41,8 @@ See `.env.example`. Key vars:
 - `GET /api/occurrences` returns stored occurrences from the feed.
 - `DEFAULT_PROVIDER` (`ollama` or `llama_cpp`).
 - `DEFAULT_LLM_BASE_URL`, `DEFAULT_MODEL`, `DEFAULT_SYSTEM_PROMPT`.
+- `EMBEDDING_TIMEOUT_SECONDS` for embedding calls used by RAG lookup.
+- `LLM_TIMEOUT_SECONDS`, `LLM_RETRY_ATTEMPTS`, `LLM_RETRY_BACKOFF_SECONDS` to handle transient model server disconnects/timeouts.
 - `LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, ...).
 
 If Qdrant collections are not configured or embedding lookup fails, RAG is skipped gracefully.

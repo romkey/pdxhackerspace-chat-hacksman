@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any
@@ -50,6 +51,39 @@ def _ns_to_ms(value: Any) -> float | None:
 
 @dataclass(slots=True)
 class LlmService:
+    request_timeout_seconds: float = 180.0
+    retry_attempts: int = 2
+    retry_backoff_seconds: float = 0.5
+
+    async def _post_json_with_retries(self, *, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        last_exc: httpx.HTTPError | None = None
+        max_attempts = max(1, self.retry_attempts)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self.request_timeout_seconds) as client:
+                    response = await client.post(url, json=payload)
+                if response.status_code >= 400:
+                    msg = f"LLM request failed ({response.status_code}): {response.text}"
+                    raise LlmError(msg)
+                try:
+                    data = response.json()
+                except ValueError as exc:
+                    raise LlmError(f"LLM provider returned invalid JSON: {exc}") from exc
+                if not isinstance(data, dict):
+                    raise LlmError("LLM provider returned a non-object JSON payload.")
+                return data
+            except LlmError:
+                raise
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt < max_attempts:
+                    await asyncio.sleep(self.retry_backoff_seconds * attempt)
+                    continue
+                break
+
+        msg = f"LLM request failed after {max_attempts} attempt(s): {last_exc}"
+        raise LlmError(msg)
+
     async def chat(
         self,
         *,
@@ -118,12 +152,7 @@ class LlmService:
                 "seed": settings.tweaks.seed,
             },
         }
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(url, json=payload)
-            if response.status_code >= 400:
-                msg = f"Ollama request failed ({response.status_code}): {response.text}"
-                raise LlmError(msg)
-            data = response.json()
+        data = await self._post_json_with_retries(url=url, payload=payload)
         content = data.get("message", {}).get("content")
         if not isinstance(content, str):
             raise LlmError("Ollama returned an unexpected payload.")
@@ -170,12 +199,7 @@ class LlmService:
             "repeat_penalty": settings.tweaks.repeat_penalty,
             "seed": settings.tweaks.seed,
         }
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(url, json=payload)
-            if response.status_code >= 400:
-                msg = f"llama.cpp request failed ({response.status_code}): {response.text}"
-                raise LlmError(msg)
-            data = response.json()
+        data = await self._post_json_with_retries(url=url, payload=payload)
 
         choices = data.get("choices", [])
         if not isinstance(choices, list) or not choices:

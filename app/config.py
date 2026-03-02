@@ -21,6 +21,10 @@ class AppConfig:
     rag_top_k: int
     embedding_url: str
     embedding_model: str
+    embedding_timeout_seconds: float
+    llm_timeout_seconds: float
+    llm_retry_attempts: int
+    llm_retry_backoff_seconds: float
     default_provider: str
     default_llm_base_url: str
     default_model: str
@@ -51,6 +55,10 @@ def load_config() -> AppConfig:
         rag_top_k=int(os.getenv("RAG_TOP_K", "4")),
         embedding_url=os.getenv("EMBEDDING_URL", "http://localhost:11434"),
         embedding_model=os.getenv("EMBEDDING_MODEL", "nomic-embed-text"),
+        embedding_timeout_seconds=float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "30")),
+        llm_timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "180")),
+        llm_retry_attempts=int(os.getenv("LLM_RETRY_ATTEMPTS", "2")),
+        llm_retry_backoff_seconds=float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "0.5")),
         default_provider=os.getenv("DEFAULT_PROVIDER", "ollama"),
         default_llm_base_url=os.getenv("DEFAULT_LLM_BASE_URL", "http://localhost:11434"),
         default_model=os.getenv("DEFAULT_MODEL", "llama3.2:latest"),

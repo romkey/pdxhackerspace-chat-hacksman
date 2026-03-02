@@ -29,6 +29,7 @@ class RagService:
     embedding_url: str
     embedding_model: str
     top_k: int
+    embedding_timeout_seconds: float = 30.0
     _collection_vector_dims: dict[str, int | None] = field(default_factory=dict)
 
     def _make_qdrant_client(self) -> QdrantClient:
@@ -41,7 +42,7 @@ class RagService:
                 self.embedding_model,
                 self.embedding_url,
             )
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=self.embedding_timeout_seconds) as client:
                 response = await client.post(
                     f"{self.embedding_url.rstrip('/')}/api/embeddings",
                     json={"model": self.embedding_model, "prompt": query},

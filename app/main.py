@@ -52,8 +52,13 @@ rag_service = RagService(
     embedding_url=config.embedding_url,
     embedding_model=config.embedding_model,
     top_k=config.rag_top_k,
+    embedding_timeout_seconds=config.embedding_timeout_seconds,
 )
-llm_service = LlmService()
+llm_service = LlmService(
+    request_timeout_seconds=config.llm_timeout_seconds,
+    retry_attempts=config.llm_retry_attempts,
+    retry_backoff_seconds=config.llm_retry_backoff_seconds,
+)
 logger.info(
     "Configured Qdrant collections from env: %s",
     ",".join(config.rag_collections) if config.rag_collections else "(none)",
