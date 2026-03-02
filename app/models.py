@@ -40,6 +40,18 @@ class RagCollectionsResponse(BaseModel):
     enabled_collections: list[str]
 
 
+class ModelsResponse(BaseModel):
+    provider: ProviderName
+    models: list[str]
+    error: str | None = None
+
+
+class MetaResponse(BaseModel):
+    app_name: str
+    version: str
+    repo_url: str
+
+
 class ContextChunk(BaseModel):
     collection: str
     score: float
@@ -50,11 +62,13 @@ class ContextChunk(BaseModel):
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=8000)
     use_rag: bool = True
+    temporary_chat: bool = False
 
 
 class ChatResponse(BaseModel):
     answer: str
     context: list[ContextChunk] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
 
 
 class HistoryRecord(BaseModel):

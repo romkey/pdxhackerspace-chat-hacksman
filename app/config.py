@@ -26,6 +26,7 @@ class AppConfig:
     default_model: str
     default_system_prompt: str
     log_level: str
+    repo_url: str
 
 
 def load_config() -> AppConfig:
@@ -58,4 +59,8 @@ def load_config() -> AppConfig:
             "You are Chat Hacksman, an expert assistant for hackerspace members.",
         ),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
+        repo_url=os.getenv(
+            "REPO_URL",
+            "https://github.com/romkey/pdxhackerspace-chat-hacksman",
+        ),
     )

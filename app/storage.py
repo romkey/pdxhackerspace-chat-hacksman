@@ -163,3 +163,25 @@ class Storage:
                 )
             )
         return records
+
+    def clear_history(self) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM chat_history")
+            conn.commit()
+            return int(cursor.rowcount or 0)
+
+    def delete_latest_history(self) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM chat_history
+                WHERE id = (
+                    SELECT id
+                    FROM chat_history
+                    ORDER BY id DESC
+                    LIMIT 1
+                )
+                """
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)

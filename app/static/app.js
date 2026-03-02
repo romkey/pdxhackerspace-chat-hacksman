@@ -3,7 +3,9 @@ const el = (id) => document.getElementById(id);
 const fields = {
   provider: el("provider"),
   llmBaseUrl: el("llm-base-url"),
-  model: el("model"),
+  modelSelect: el("model-select"),
+  modelCustom: el("model-custom"),
+  refreshModels: el("refresh-models"),
   systemPrompt: el("system-prompt"),
   temperature: el("temperature"),
   topP: el("top-p"),
@@ -14,15 +16,21 @@ const fields = {
   status: el("status"),
   question: el("question"),
   response: el("response"),
+  metrics: el("metrics"),
+  performanceChart: el("performance-chart"),
   history: el("history"),
   diagnostics: el("diagnostics"),
+  footerMeta: el("footer-meta"),
   topicButtons: el("topic-buttons"),
   ragCollections: el("rag-collections"),
   useRag: el("use-rag"),
+  temporaryChat: el("temporary-chat"),
   numCtxField: el("num-ctx-field"),
   seedField: el("seed-field"),
 };
 let availableRagCollections = [];
+let availableModels = [];
+const PERFORMANCE_HISTORY_LIMIT = 20;
 const diagnosticsState = {
   health: { status: "unknown", checkedAt: null, error: null },
   topics: {
@@ -34,6 +42,7 @@ const diagnosticsState = {
   },
   rag: {
     useRag: true,
+    temporaryChat: false,
     availableCollections: [],
     enabledCollections: [],
     lastContextChunks: 0,
@@ -41,6 +50,16 @@ const diagnosticsState = {
     lastAskedAt: null,
     lastError: null,
   },
+  performance: {
+    totalLatencyMs: null,
+    ragLatencyMs: null,
+    llmLatencyMs: null,
+    promptTokens: null,
+    completionTokens: null,
+    totalTokens: null,
+    tokensPerSecond: null,
+  },
+  performanceHistory: [],
 };
 
 function isoNow() {
@@ -49,6 +68,53 @@ function isoNow() {
 
 function showStatus(msg) {
   fields.status.textContent = msg;
+}
+
+function initHelpTips() {
+  const tipButtons = Array.from(document.querySelectorAll(".help-tip"));
+  const hideAll = () => {
+    tipButtons.forEach((button) => {
+      const tipId = button.dataset.tipId;
+      if (!tipId) {
+        return;
+      }
+      const tip = el(tipId);
+      if (!tip) {
+        return;
+      }
+      tip.hidden = true;
+      button.setAttribute("aria-expanded", "false");
+    });
+  };
+
+  tipButtons.forEach((button) => {
+    const tipId = button.dataset.tipId;
+    if (!tipId) {
+      return;
+    }
+    const tip = el(tipId);
+    if (!tip) {
+      return;
+    }
+    button.setAttribute("aria-label", "Show help");
+    button.setAttribute("aria-expanded", "false");
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const wasHidden = tip.hidden;
+      hideAll();
+      if (wasHidden) {
+        tip.hidden = false;
+        button.setAttribute("aria-expanded", "true");
+      }
+    });
+  });
+
+  document.addEventListener("click", hideAll);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      hideAll();
+    }
+  });
 }
 
 async function copyDiagnostics() {
@@ -61,7 +127,7 @@ async function copyDiagnostics() {
     ui_settings: {
       provider: fields.provider.value,
       llm_base_url: fields.llmBaseUrl.value.trim(),
-      model: fields.model.value.trim(),
+      model: getCurrentModel(),
       use_rag: fields.useRag.checked,
       enabled_rag_collections: enabledRagCollections,
     },
@@ -110,6 +176,7 @@ function renderDiagnostics() {
   const ragLine = [
     "[rag]",
     `use_rag=${diagnosticsState.rag.useRag}`,
+    `temporary_chat=${diagnosticsState.rag.temporaryChat}`,
     `available=${diagnosticsState.rag.availableCollections.length}`,
     `enabled=${diagnosticsState.rag.enabledCollections.length}`,
     `last_chunks=${diagnosticsState.rag.lastContextChunks}`,
@@ -120,7 +187,73 @@ function renderDiagnostics() {
     .filter(Boolean)
     .join(" ");
 
-  fields.diagnostics.textContent = [healthLine, topicsLine, ragLine].join("\n");
+  const perfLine = [
+    "[performance]",
+    `total_ms=${diagnosticsState.performance.totalLatencyMs ?? "n/a"}`,
+    `rag_ms=${diagnosticsState.performance.ragLatencyMs ?? "n/a"}`,
+    `llm_ms=${diagnosticsState.performance.llmLatencyMs ?? "n/a"}`,
+    `prompt_tokens=${diagnosticsState.performance.promptTokens ?? "n/a"}`,
+    `completion_tokens=${diagnosticsState.performance.completionTokens ?? "n/a"}`,
+    `tokens_per_sec=${diagnosticsState.performance.tokensPerSecond ?? "n/a"}`,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  fields.diagnostics.textContent = [healthLine, topicsLine, ragLine, perfLine].join("\n");
+}
+
+function renderMetrics() {
+  const perf = diagnosticsState.performance;
+  fields.metrics.textContent = [
+    `total_latency_ms: ${perf.totalLatencyMs ?? "n/a"}`,
+    `rag_latency_ms: ${perf.ragLatencyMs ?? "n/a"}`,
+    `llm_latency_ms: ${perf.llmLatencyMs ?? "n/a"}`,
+    `prompt_tokens: ${perf.promptTokens ?? "n/a"}`,
+    `completion_tokens: ${perf.completionTokens ?? "n/a"}`,
+    `total_tokens: ${perf.totalTokens ?? "n/a"}`,
+    `tokens_per_second: ${perf.tokensPerSecond ?? "n/a"}`,
+  ].join("\n");
+}
+
+function buildSparkline(values) {
+  if (!values.length) {
+    return "n/a";
+  }
+  const bars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min;
+  if (range === 0) {
+    return bars[3].repeat(values.length);
+  }
+  return values
+    .map((value) => {
+      const normalized = (value - min) / range;
+      const index = Math.max(0, Math.min(bars.length - 1, Math.round(normalized * (bars.length - 1))));
+      return bars[index];
+    })
+    .join("");
+}
+
+function renderPerformanceChart() {
+  const history = diagnosticsState.performanceHistory;
+  if (!history.length) {
+    fields.performanceChart.textContent = "No query metrics yet.";
+    return;
+  }
+  const latencySeries = history
+    .map((entry) => entry.totalLatencyMs)
+    .filter((value) => typeof value === "number");
+  const tpsSeries = history
+    .map((entry) => entry.tokensPerSecond)
+    .filter((value) => typeof value === "number");
+
+  const latest = history[history.length - 1];
+  fields.performanceChart.textContent = [
+    `queries_tracked: ${history.length}`,
+    `latency_ms   ${buildSparkline(latencySeries)}  latest=${latest.totalLatencyMs ?? "n/a"}`,
+    `tokens/sec   ${buildSparkline(tpsSeries)}  latest=${latest.tokensPerSecond ?? "n/a"}`,
+  ].join("\n");
 }
 
 function currentSettingsPayload() {
@@ -130,11 +263,12 @@ function currentSettingsPayload() {
   ).map((input) => input.value);
   diagnosticsState.rag.enabledCollections = enabledRagCollections;
   diagnosticsState.rag.useRag = fields.useRag.checked;
+  diagnosticsState.rag.temporaryChat = fields.temporaryChat.checked;
   renderDiagnostics();
   return {
     provider: fields.provider.value,
     llm_base_url: fields.llmBaseUrl.value.trim(),
-    model: fields.model.value.trim(),
+    model: getCurrentModel(),
     system_prompt: fields.systemPrompt.value,
     enabled_rag_collections: enabledRagCollections,
     tweaks: {
@@ -148,10 +282,81 @@ function currentSettingsPayload() {
   };
 }
 
+function getCurrentModel() {
+  if (fields.provider.value === "ollama") {
+    if (fields.modelSelect.value === "__custom__") {
+      return fields.modelCustom.value.trim();
+    }
+    return fields.modelSelect.value.trim();
+  }
+  return fields.modelCustom.value.trim();
+}
+
+function populateModelSelect(selectedModel) {
+  fields.modelSelect.innerHTML = "";
+  const models = [...availableModels];
+  if (selectedModel && !models.includes(selectedModel)) {
+    models.unshift(selectedModel);
+  }
+
+  models.forEach((modelName) => {
+    const option = document.createElement("option");
+    option.value = modelName;
+    option.textContent = modelName;
+    fields.modelSelect.appendChild(option);
+  });
+
+  const customOption = document.createElement("option");
+  customOption.value = "__custom__";
+  customOption.textContent = "Custom...";
+  fields.modelSelect.appendChild(customOption);
+
+  if (selectedModel && models.includes(selectedModel)) {
+    fields.modelSelect.value = selectedModel;
+    fields.modelCustom.hidden = true;
+  } else {
+    fields.modelSelect.value = "__custom__";
+    fields.modelCustom.value = selectedModel || "";
+    fields.modelCustom.hidden = false;
+  }
+}
+
+function updateModelControls() {
+  const isOllama = fields.provider.value === "ollama";
+  fields.modelSelect.hidden = !isOllama;
+  fields.refreshModels.hidden = !isOllama;
+  if (!isOllama) {
+    fields.modelCustom.hidden = false;
+    return;
+  }
+  fields.modelCustom.hidden = fields.modelSelect.value !== "__custom__";
+}
+
+async function loadAvailableModels() {
+  if (fields.provider.value !== "ollama") {
+    return;
+  }
+  const baseUrl = encodeURIComponent(fields.llmBaseUrl.value.trim());
+  const response = await fetch(`/api/models?provider=ollama&base_url=${baseUrl}`);
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  const data = await response.json();
+  availableModels = data.models || [];
+  const selectedModel = getCurrentModel();
+  populateModelSelect(selectedModel);
+  updateModelControls();
+  if (data.error) {
+    showStatus(`Model list fetch issue: ${data.error}`);
+  } else {
+    showStatus(`Loaded ${availableModels.length} Ollama models.`);
+  }
+}
+
 function applySettings(settings) {
   fields.provider.value = settings.provider;
   fields.llmBaseUrl.value = settings.llm_base_url;
-  fields.model.value = settings.model;
+  fields.modelCustom.value = settings.model;
   fields.systemPrompt.value = settings.system_prompt;
   fields.temperature.value = settings.tweaks.temperature;
   fields.topP.value = settings.tweaks.top_p;
@@ -164,6 +369,8 @@ function applySettings(settings) {
     settings.enabled_rag_collections || []
   );
   toggleProviderFields();
+  updateModelControls();
+  populateModelSelect(settings.model);
 }
 
 function toggleProviderFields() {
@@ -176,6 +383,9 @@ async function loadSettings() {
   const response = await fetch("/api/settings");
   const data = await response.json();
   applySettings(data);
+  if (fields.provider.value === "ollama") {
+    await loadAvailableModels();
+  }
   diagnosticsState.rag.enabledCollections = data.enabled_rag_collections || [];
   diagnosticsState.rag.useRag = fields.useRag.checked;
   renderDiagnostics();
@@ -282,12 +492,69 @@ async function loadHistory() {
     return;
   }
   const rows = await response.json();
-  fields.history.textContent = rows
-    .map(
-      (item) =>
-        `[${item.created_at}] (${item.provider}/${item.model})\nQ: ${item.question}\nA: ${item.answer}\n---`
-    )
-    .join("\n");
+  fields.history.innerHTML = "";
+  if (!rows.length) {
+    fields.history.textContent = "No chat history yet.";
+    return;
+  }
+  rows.forEach((item) => {
+    const wrapper = document.createElement("article");
+    wrapper.className = "history-item";
+
+    const meta = document.createElement("div");
+    meta.className = "history-meta";
+    meta.textContent = `${item.created_at} | ${item.provider}/${item.model}`;
+    wrapper.appendChild(meta);
+
+    const qa = document.createElement("pre");
+    qa.className = "history-qa";
+    qa.textContent = `Q: ${item.question}\n\nA: ${item.answer}`;
+    wrapper.appendChild(qa);
+
+    const lastMetrics = item.config_snapshot?.last_metrics;
+    if (lastMetrics) {
+      const perf = document.createElement("div");
+      perf.className = "history-meta";
+      perf.textContent =
+        `latency=${lastMetrics.total_latency_ms ?? "n/a"}ms, ` +
+        `tokens/sec=${lastMetrics.tokens_per_second ?? "n/a"}, ` +
+        `chunks=${lastMetrics.context_chunks_used ?? "n/a"}`;
+      wrapper.appendChild(perf);
+    }
+
+    fields.history.appendChild(wrapper);
+  });
+}
+
+async function clearHistory() {
+  if (!window.confirm("Clear all saved chat history? This cannot be undone.")) {
+    return;
+  }
+  const response = await fetch("/api/history", { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  const data = await response.json();
+  diagnosticsState.performanceHistory = [];
+  renderPerformanceChart();
+  await loadHistory();
+  showStatus(`History cleared (${data.deleted_rows ?? 0} records).`);
+}
+
+async function deleteLatestHistory() {
+  const response = await fetch("/api/history/latest", { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  const data = await response.json();
+  await loadHistory();
+  showStatus(`Deleted latest history record (${data.deleted_rows ?? 0} removed).`);
+}
+
+function clearPerformanceTrend() {
+  diagnosticsState.performanceHistory = [];
+  renderPerformanceChart();
+  showStatus("Performance trend cleared.");
 }
 
 async function askQuestion() {
@@ -306,6 +573,7 @@ async function askQuestion() {
     body: JSON.stringify({
       question,
       use_rag: fields.useRag.checked,
+      temporary_chat: fields.temporaryChat.checked,
     }),
   });
   if (!response.ok) {
@@ -313,7 +581,17 @@ async function askQuestion() {
     fields.response.textContent = `Request failed: ${errBody}`;
     diagnosticsState.rag.lastError = errBody;
     diagnosticsState.rag.lastAskedAt = isoNow();
+    diagnosticsState.performance = {
+      totalLatencyMs: null,
+      ragLatencyMs: null,
+      llmLatencyMs: null,
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+      tokensPerSecond: null,
+    };
     renderDiagnostics();
+    renderMetrics();
     showStatus("Chat request failed.");
     return;
   }
@@ -325,8 +603,29 @@ async function askQuestion() {
   );
   diagnosticsState.rag.lastError = null;
   diagnosticsState.rag.lastAskedAt = isoNow();
+  diagnosticsState.rag.temporaryChat = fields.temporaryChat.checked;
+  diagnosticsState.performance = {
+    totalLatencyMs: data.metrics?.total_latency_ms ?? null,
+    ragLatencyMs: data.metrics?.rag_latency_ms ?? null,
+    llmLatencyMs: data.metrics?.llm_latency_ms ?? null,
+    promptTokens: data.metrics?.prompt_tokens ?? null,
+    completionTokens: data.metrics?.completion_tokens ?? null,
+    totalTokens: data.metrics?.total_tokens ?? null,
+    tokensPerSecond: data.metrics?.tokens_per_second ?? null,
+  };
+  diagnosticsState.performanceHistory.push({
+    totalLatencyMs: diagnosticsState.performance.totalLatencyMs,
+    tokensPerSecond: diagnosticsState.performance.tokensPerSecond,
+  });
+  if (diagnosticsState.performanceHistory.length > PERFORMANCE_HISTORY_LIMIT) {
+    diagnosticsState.performanceHistory = diagnosticsState.performanceHistory.slice(-PERFORMANCE_HISTORY_LIMIT);
+  }
   renderDiagnostics();
-  showStatus(`Done. Context chunks used: ${data.context.length}`);
+  renderMetrics();
+  renderPerformanceChart();
+  showStatus(
+    `Done. Context chunks used: ${data.context.length}. Latency: ${data.metrics?.total_latency_ms ?? "n/a"} ms${fields.temporaryChat.checked ? " (temporary, not saved)" : ""}`
+  );
   await loadHistory();
 }
 
@@ -361,9 +660,49 @@ el("copy-diagnostics").addEventListener("click", async () => {
   }
 });
 
+el("clear-history").addEventListener("click", async () => {
+  try {
+    await clearHistory();
+  } catch (err) {
+    showStatus(`Clear history failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+});
+
+el("delete-latest-history").addEventListener("click", async () => {
+  try {
+    await deleteLatestHistory();
+  } catch (err) {
+    showStatus(`Delete latest failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+});
+
+el("clear-performance-trend").addEventListener("click", () => {
+  clearPerformanceTrend();
+});
+
 fields.provider.addEventListener("change", toggleProviderFields);
+fields.provider.addEventListener("change", async () => {
+  updateModelControls();
+  if (fields.provider.value === "ollama") {
+    await loadAvailableModels();
+  }
+});
+fields.modelSelect.addEventListener("change", () => {
+  updateModelControls();
+});
+fields.refreshModels.addEventListener("click", async () => {
+  try {
+    await loadAvailableModels();
+  } catch (err) {
+    showStatus(`Refresh models failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+});
 fields.useRag.addEventListener("change", () => {
   diagnosticsState.rag.useRag = fields.useRag.checked;
+  renderDiagnostics();
+});
+fields.temporaryChat.addEventListener("change", () => {
+  diagnosticsState.rag.temporaryChat = fields.temporaryChat.checked;
   renderDiagnostics();
 });
 
@@ -383,8 +722,35 @@ async function checkHealth() {
   renderDiagnostics();
 }
 
+async function loadMeta() {
+  try {
+    const response = await fetch("/api/meta");
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    const meta = await response.json();
+    const appName = meta.app_name || "Chat Hacksman";
+    const version = meta.version || "unknown";
+    const repoUrl = meta.repo_url || "";
+    if (repoUrl) {
+      fields.footerMeta.innerHTML =
+        `${appName} v${version} - ` +
+        `<a href="${repoUrl}" target="_blank" rel="noopener noreferrer">GitHub</a>`;
+    } else {
+      fields.footerMeta.textContent = `${appName} v${version}`;
+    }
+  } catch (err) {
+    fields.footerMeta.textContent = "Chat Hacksman";
+    showStatus(`Meta load failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function bootstrap() {
+  initHelpTips();
   renderDiagnostics();
+  renderMetrics();
+  renderPerformanceChart();
+  await loadMeta();
   await checkHealth();
   await loadRagCollections();
   await loadSettings();

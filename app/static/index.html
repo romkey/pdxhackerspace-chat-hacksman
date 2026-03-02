@@ -5,20 +5,49 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Chat Hacksman</title>
     <style>
-      body { font-family: system-ui, sans-serif; margin: 0; background: #111827; color: #f3f4f6; }
+      body { font-family: system-ui, sans-serif; margin: 0; background: #111827; color: #f3f4f6; min-height: 100vh; display: flex; flex-direction: column; }
       .container { max-width: 1200px; margin: 0 auto; padding: 1rem; display: grid; gap: 1rem; grid-template-columns: 360px 1fr; }
       .card { background: #1f2937; border-radius: 8px; padding: 1rem; }
       .field { display: grid; gap: 0.35rem; margin-bottom: 0.7rem; }
       label { font-size: 0.9rem; color: #d1d5db; }
+      .label-with-help { display: inline-flex; align-items: center; gap: 0.4rem; }
+      .help-tip {
+        width: 1.1rem;
+        height: 1.1rem;
+        border-radius: 9999px;
+        border: 1px solid #9ca3af;
+        background: #374151;
+        color: #f3f4f6;
+        font-size: 0.75rem;
+        line-height: 1;
+        padding: 0;
+        cursor: pointer;
+      }
+      .tooltip {
+        background: #0f172a;
+        border: 1px solid #4b5563;
+        border-radius: 6px;
+        padding: 0.5rem;
+        color: #d1d5db;
+        font-size: 0.8rem;
+      }
       input, select, textarea, button { border-radius: 6px; border: 1px solid #4b5563; background: #111827; color: #f3f4f6; padding: 0.5rem; }
       textarea { min-height: 100px; resize: vertical; }
       button { cursor: pointer; background: #2563eb; border-color: #2563eb; }
       .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+      .button-row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
       #topic-buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; }
       #topic-buttons button { background: #374151; border-color: #4b5563; }
       #rag-collections { display: grid; gap: 0.25rem; margin-bottom: 0.7rem; }
-      #response, #history, #diagnostics { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+      #response, #history, #diagnostics, #metrics { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+      #performance-chart { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; color: #d1d5db; }
+      .history-item { border: 1px solid #374151; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.75rem; background: #111827; }
+      .history-meta { color: #9ca3af; font-size: 0.8rem; margin-bottom: 0.4rem; }
+      .history-qa { margin: 0; white-space: pre-wrap; }
       .muted { color: #9ca3af; font-size: 0.85rem; }
+      .footer { margin-top: auto; border-top: 1px solid #374151; padding: 0.75rem 1rem; color: #9ca3af; font-size: 0.85rem; text-align: center; }
+      .footer a { color: #93c5fd; text-decoration: none; }
+      .footer a:hover { text-decoration: underline; }
       @media (max-width: 900px) { .container { grid-template-columns: 1fr; } }
     </style>
   </head>
@@ -27,52 +56,94 @@
       <section class="card">
         <h2>Chat Hacksman</h2>
         <div class="field">
-          <label for="provider">Provider</label>
+          <label for="provider" class="label-with-help">
+            Provider
+            <button class="help-tip" data-tip-id="tip-provider" type="button">?</button>
+          </label>
+          <div id="tip-provider" class="tooltip" hidden>Choose the API flavor. Use <code>ollama</code> for Ollama servers and <code>llama.cpp</code> for OpenAI-compatible llama.cpp servers.</div>
           <select id="provider">
             <option value="ollama">Ollama</option>
             <option value="llama_cpp">llama.cpp</option>
           </select>
         </div>
         <div class="field">
-          <label for="llm-base-url">LLM Base URL</label>
+          <label for="llm-base-url" class="label-with-help">
+            LLM Base URL
+            <button class="help-tip" data-tip-id="tip-base-url" type="button">?</button>
+          </label>
+          <div id="tip-base-url" class="tooltip" hidden>The base endpoint for your model server, such as <code>http://localhost:11434</code>.</div>
           <input id="llm-base-url" />
         </div>
         <div class="field">
-          <label for="model">Model</label>
-          <input id="model" />
+          <label for="model-select" class="label-with-help">
+            Model
+            <button class="help-tip" data-tip-id="tip-model" type="button">?</button>
+          </label>
+          <div id="tip-model" class="tooltip" hidden>Select an available Ollama model, or use custom input. For llama.cpp, enter model name manually.</div>
+          <select id="model-select"></select>
+          <input id="model-custom" placeholder="custom model name" hidden />
+          <button id="refresh-models" type="button">Refresh Models</button>
         </div>
         <div class="field">
-          <label for="system-prompt">System Prompt (remembered)</label>
+          <label for="system-prompt" class="label-with-help">
+            System Prompt (remembered)
+            <button class="help-tip" data-tip-id="tip-system-prompt" type="button">?</button>
+          </label>
+          <div id="tip-system-prompt" class="tooltip" hidden>Persistent instruction prepended to every request. Use this to set tone, scope, and constraints.</div>
           <textarea id="system-prompt"></textarea>
         </div>
 
         <div class="row">
           <div class="field">
-            <label for="temperature">Temperature</label>
+            <label for="temperature" class="label-with-help">
+              Temperature
+              <button class="help-tip" data-tip-id="tip-temperature" type="button">?</button>
+            </label>
+            <div id="tip-temperature" class="tooltip" hidden>Controls randomness. Lower values are more deterministic; higher values are more creative.</div>
             <input id="temperature" type="number" step="0.01" min="0" max="2" />
           </div>
           <div class="field">
-            <label for="top-p">Top P</label>
+            <label for="top-p" class="label-with-help">
+              Top P
+              <button class="help-tip" data-tip-id="tip-top-p" type="button">?</button>
+            </label>
+            <div id="tip-top-p" class="tooltip" hidden>Nucleus sampling limit. Lower values narrow token choices to higher-probability words.</div>
             <input id="top-p" type="number" step="0.01" min="0" max="1" />
           </div>
         </div>
         <div class="row">
           <div class="field">
-            <label for="max-tokens">Max Tokens</label>
+            <label for="max-tokens" class="label-with-help">
+              Max Tokens
+              <button class="help-tip" data-tip-id="tip-max-tokens" type="button">?</button>
+            </label>
+            <div id="tip-max-tokens" class="tooltip" hidden>Maximum number of output tokens the model is allowed to generate.</div>
             <input id="max-tokens" type="number" min="1" max="4096" />
           </div>
           <div class="field">
-            <label for="repeat-penalty">Repeat Penalty</label>
+            <label for="repeat-penalty" class="label-with-help">
+              Repeat Penalty
+              <button class="help-tip" data-tip-id="tip-repeat-penalty" type="button">?</button>
+            </label>
+            <div id="tip-repeat-penalty" class="tooltip" hidden>Penalizes repeated tokens. Increase to reduce loops/repetition.</div>
             <input id="repeat-penalty" type="number" step="0.01" min="0" max="3" />
           </div>
         </div>
         <div class="row">
           <div class="field" id="num-ctx-field">
-            <label for="num-ctx">Ollama Num Context</label>
+            <label for="num-ctx" class="label-with-help">
+              Ollama Num Context
+              <button class="help-tip" data-tip-id="tip-num-ctx" type="button">?</button>
+            </label>
+            <div id="tip-num-ctx" class="tooltip" hidden>Ollama context window size. Larger context can use more memory and be slower.</div>
             <input id="num-ctx" type="number" min="256" max="32768" />
           </div>
           <div class="field" id="seed-field">
-            <label for="seed">llama.cpp Seed (optional)</label>
+            <label for="seed" class="label-with-help">
+              llama.cpp Seed (optional)
+              <button class="help-tip" data-tip-id="tip-seed" type="button">?</button>
+            </label>
+            <div id="tip-seed" class="tooltip" hidden>Random seed for sampling. Set a fixed integer for reproducible outputs.</div>
             <input id="seed" type="number" />
           </div>
         </div>
@@ -80,7 +151,11 @@
           <button id="save-settings">Save Settings</button>
           <button id="refresh-topics" type="button">Refresh Topics</button>
         </div>
-        <h4>Qdrant Collections</h4>
+        <h4 class="label-with-help">
+          Qdrant Collections
+          <button class="help-tip" data-tip-id="tip-rag-collections" type="button">?</button>
+        </h4>
+        <div id="tip-rag-collections" class="tooltip" hidden>Enable which collections are eligible for retrieval. Disabled collections are ignored for RAG.</div>
         <div id="rag-collections" class="muted"></div>
         <p class="muted" id="status"></p>
       </section>
@@ -90,16 +165,42 @@
         <div id="topic-buttons"></div>
         <hr />
         <div class="field">
-          <label for="question">Question</label>
+          <label for="question" class="label-with-help">
+            Question
+            <button class="help-tip" data-tip-id="tip-question" type="button">?</button>
+          </label>
+          <div id="tip-question" class="tooltip" hidden>Your prompt to the assistant. Clicking a topic button fills this and sends it immediately.</div>
           <textarea id="question"></textarea>
         </div>
         <div class="row">
           <button id="ask">Ask</button>
-          <label class="muted"><input id="use-rag" type="checkbox" checked /> Use RAG</label>
+          <label class="muted label-with-help">
+            <input id="use-rag" type="checkbox" checked /> Use RAG
+            <button class="help-tip" data-tip-id="tip-use-rag" type="button">?</button>
+          </label>
+          <div id="tip-use-rag" class="tooltip" hidden>When enabled, retrieved context chunks from Qdrant are added to the model prompt.</div>
+        </div>
+        <div class="row">
+          <label class="muted label-with-help">
+            <input id="temporary-chat" type="checkbox" /> Temporary Chat (do not save)
+            <button class="help-tip" data-tip-id="tip-temporary-chat" type="button">?</button>
+          </label>
+          <div id="tip-temporary-chat" class="tooltip" hidden>When enabled, this chat request is processed normally but not written to history.</div>
         </div>
         <h4>Response</h4>
         <div id="response"></div>
-        <h4>History</h4>
+        <div class="button-row">
+          <h4>Performance</h4>
+          <button id="clear-performance-trend" type="button">Clear Trend</button>
+        </div>
+        <div id="metrics"></div>
+        <h4>Performance Trend (last 20 queries)</h4>
+        <div id="performance-chart"></div>
+        <div class="button-row">
+          <h4>History</h4>
+          <button id="delete-latest-history" type="button">Delete Latest</button>
+          <button id="clear-history" type="button">Clear History</button>
+        </div>
         <div id="history"></div>
         <div class="row">
           <h4>Diagnostics</h4>
@@ -108,6 +209,9 @@
         <div id="diagnostics"></div>
       </section>
     </div>
+    <footer class="footer">
+      <span id="footer-meta">Chat Hacksman</span>
+    </footer>
     <script src="/static/app.js"></script>
   </body>
   </html>
