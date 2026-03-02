@@ -46,6 +46,18 @@ class ModelsResponse(BaseModel):
     error: str | None = None
 
 
+class ModelPullRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    provider: ProviderName | None = None
+    base_url: str | None = None
+
+
+class ModelPullResponse(BaseModel):
+    provider: ProviderName
+    pulled_model: str
+    status: str
+
+
 class MetaResponse(BaseModel):
     app_name: str
     version: str

@@ -79,9 +79,11 @@
             Model
             <button class="help-tip" data-tip-id="tip-model" type="button">?</button>
           </label>
-          <div id="tip-model" class="tooltip" hidden>Select an available Ollama model, or use custom input. For llama.cpp, enter model name manually.</div>
+          <div id="tip-model" class="tooltip" hidden>Select from installed Ollama models. For llama.cpp, enter model name manually in the text field.</div>
           <select id="model-select"></select>
-          <input id="model-custom" placeholder="custom model name" hidden />
+          <input id="model-input" placeholder="model name (llama.cpp)" hidden />
+          <input id="pull-model-name" placeholder="ollama model to pull (e.g. llama3.2:latest)" hidden />
+          <button id="pull-model" type="button" hidden>Pull Model</button>
           <button id="refresh-models" type="button">Refresh Models</button>
         </div>
         <div class="field">

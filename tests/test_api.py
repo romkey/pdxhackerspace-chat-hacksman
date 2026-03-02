@@ -228,3 +228,42 @@ def test_meta_endpoint() -> None:
         assert body["app_name"] == "Chat Hacksman"
         assert isinstance(body["version"], str)
         assert isinstance(body["repo_url"], str)
+
+
+def test_pull_model_endpoint(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"status": "success"}
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        async def post(self, url, json):
+            assert url.endswith("/api/pull")
+            assert json["name"] == "llama3.2:latest"
+            assert json["stream"] is False
+            return FakeResponse()
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", lambda timeout: FakeAsyncClient())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/models/pull",
+            json={
+                "provider": "ollama",
+                "base_url": "http://localhost:11434",
+                "name": "llama3.2:latest",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["provider"] == "ollama"
+        assert body["pulled_model"] == "llama3.2:latest"

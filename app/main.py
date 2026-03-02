@@ -20,6 +20,8 @@ from app.models import (
     ChatRequest,
     ChatResponse,
     MetaResponse,
+    ModelPullRequest,
+    ModelPullResponse,
     ModelsResponse,
     RagCollectionsResponse,
     SettingsUpdate,
@@ -197,6 +199,46 @@ async def get_models(
 
     names = sorted(list(dict.fromkeys(names)), key=lambda item: item.casefold())
     return ModelsResponse(provider="ollama", models=names, error=None)
+
+
+@app.post("/api/models/pull", response_model=ModelPullResponse)
+async def pull_model(request: ModelPullRequest) -> ModelPullResponse:
+    settings = storage.get_settings()
+    requested_provider = (request.provider or settings.provider).strip()
+    target_provider = (
+        requested_provider
+        if requested_provider in {"ollama", "llama_cpp"}
+        else settings.provider
+    )
+    if target_provider != "ollama":
+        raise HTTPException(status_code=400, detail="Model pull is only supported for Ollama.")
+
+    target_base_url = (request.base_url or settings.llm_base_url).strip()
+    model_name = request.name.strip()
+    if not model_name:
+        raise HTTPException(status_code=400, detail="Model name is required.")
+
+    logger.info("Pulling Ollama model name=%s from %s", model_name, target_base_url)
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            response = await client.post(
+                f"{target_base_url.rstrip('/')}/api/pull",
+                json={"name": model_name, "stream": False},
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        logger.warning("Failed to pull Ollama model name=%s: %s", model_name, exc)
+        raise HTTPException(status_code=502, detail=f"Failed to pull model: {exc}") from exc
+
+    status = payload.get("status", "success")
+    if not isinstance(status, str):
+        status = "success"
+    return ModelPullResponse(
+        provider="ollama",
+        pulled_model=model_name,
+        status=status,
+    )
 
 
 @app.get("/api/topics")

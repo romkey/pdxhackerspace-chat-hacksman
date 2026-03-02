@@ -4,7 +4,9 @@ const fields = {
   provider: el("provider"),
   llmBaseUrl: el("llm-base-url"),
   modelSelect: el("model-select"),
-  modelCustom: el("model-custom"),
+  modelInput: el("model-input"),
+  pullModelName: el("pull-model-name"),
+  pullModel: el("pull-model"),
   refreshModels: el("refresh-models"),
   systemPrompt: el("system-prompt"),
   temperature: el("temperature"),
@@ -294,20 +296,17 @@ function currentSettingsPayload() {
 }
 
 function getCurrentModel() {
-  if (!fields.modelCustom || !fields.modelSelect || !fields.provider) {
+  if (!fields.modelInput || !fields.modelSelect || !fields.provider) {
     return "";
   }
   if (fields.provider.value === "ollama") {
-    if (fields.modelSelect.value === "__custom__") {
-      return fields.modelCustom.value.trim();
-    }
     return fields.modelSelect.value.trim();
   }
-  return fields.modelCustom.value.trim();
+  return fields.modelInput.value.trim();
 }
 
 function populateModelSelect(selectedModel) {
-  if (!fields.modelSelect || !fields.modelCustom) {
+  if (!fields.modelSelect || !fields.modelInput) {
     return;
   }
   fields.modelSelect.innerHTML = "";
@@ -323,33 +322,32 @@ function populateModelSelect(selectedModel) {
     fields.modelSelect.appendChild(option);
   });
 
-  const customOption = document.createElement("option");
-  customOption.value = "__custom__";
-  customOption.textContent = "Custom...";
-  fields.modelSelect.appendChild(customOption);
-
   if (selectedModel && models.includes(selectedModel)) {
     fields.modelSelect.value = selectedModel;
-    fields.modelCustom.hidden = true;
+  } else if (models.length > 0) {
+    fields.modelSelect.value = models[0];
   } else {
-    fields.modelSelect.value = "__custom__";
-    fields.modelCustom.value = selectedModel || "";
-    fields.modelCustom.hidden = false;
+    fields.modelSelect.value = "";
   }
 }
 
 function updateModelControls() {
-  if (!fields.provider || !fields.modelSelect || !fields.refreshModels || !fields.modelCustom) {
+  if (
+    !fields.provider ||
+    !fields.modelSelect ||
+    !fields.refreshModels ||
+    !fields.modelInput ||
+    !fields.pullModelName ||
+    !fields.pullModel
+  ) {
     return;
   }
   const isOllama = fields.provider.value === "ollama";
   fields.modelSelect.hidden = !isOllama;
   fields.refreshModels.hidden = !isOllama;
-  if (!isOllama) {
-    fields.modelCustom.hidden = false;
-    return;
-  }
-  fields.modelCustom.hidden = fields.modelSelect.value !== "__custom__";
+  fields.pullModelName.hidden = !isOllama;
+  fields.pullModel.hidden = !isOllama;
+  fields.modelInput.hidden = isOllama;
 }
 
 async function loadAvailableModels() {
@@ -392,7 +390,7 @@ function applySettings(settings) {
   }
   fields.provider.value = settings.provider;
   fields.llmBaseUrl.value = settings.llm_base_url;
-  fields.modelCustom.value = settings.model;
+  fields.modelInput.value = settings.model;
   fields.systemPrompt.value = settings.system_prompt;
   fields.temperature.value = settings.tweaks.temperature;
   fields.topP.value = settings.tweaks.top_p;
@@ -429,6 +427,36 @@ async function loadSettings() {
   diagnosticsState.rag.enabledCollections = data.enabled_rag_collections || [];
   diagnosticsState.rag.useRag = fields.useRag.checked;
   renderDiagnostics();
+}
+
+async function pullModel() {
+  if (!fields.pullModelName || !fields.llmBaseUrl) {
+    return;
+  }
+  const name = fields.pullModelName.value.trim();
+  if (!name) {
+    showStatus("Enter a model name to pull.");
+    return;
+  }
+
+  showStatus(`Pulling model ${name}...`);
+  const response = await fetch("/api/models/pull", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      provider: "ollama",
+      base_url: fields.llmBaseUrl.value.trim(),
+      name,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  const data = await response.json();
+  await loadAvailableModels();
+  populateModelSelect(data.pulled_model);
+  fields.pullModelName.value = "";
+  showStatus(`Pulled model ${data.pulled_model}.`);
 }
 
 function renderRagCollectionCheckboxes(availableCollections, enabledCollections) {
@@ -744,6 +772,15 @@ if (fields.refreshModels) {
       await loadAvailableModels();
     } catch (err) {
       showStatus(`Refresh models failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+}
+if (fields.pullModel) {
+  fields.pullModel.addEventListener("click", async () => {
+    try {
+      await pullModel();
+    } catch (err) {
+      showStatus(`Pull model failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
 }
