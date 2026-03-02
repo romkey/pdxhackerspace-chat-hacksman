@@ -67,7 +67,9 @@ function isoNow() {
 }
 
 function showStatus(msg) {
-  fields.status.textContent = msg;
+  if (fields.status) {
+    fields.status.textContent = msg;
+  }
 }
 
 function initHelpTips() {
@@ -153,6 +155,9 @@ async function copyDiagnostics() {
 }
 
 function renderDiagnostics() {
+  if (!fields.diagnostics) {
+    return;
+  }
   const healthLine = [
     "[health]",
     `status=${diagnosticsState.health.status}`,
@@ -203,6 +208,9 @@ function renderDiagnostics() {
 }
 
 function renderMetrics() {
+  if (!fields.metrics) {
+    return;
+  }
   const perf = diagnosticsState.performance;
   fields.metrics.textContent = [
     `total_latency_ms: ${perf.totalLatencyMs ?? "n/a"}`,
@@ -236,6 +244,9 @@ function buildSparkline(values) {
 }
 
 function renderPerformanceChart() {
+  if (!fields.performanceChart) {
+    return;
+  }
   const history = diagnosticsState.performanceHistory;
   if (!history.length) {
     fields.performanceChart.textContent = "No query metrics yet.";
@@ -283,6 +294,9 @@ function currentSettingsPayload() {
 }
 
 function getCurrentModel() {
+  if (!fields.modelCustom || !fields.modelSelect || !fields.provider) {
+    return "";
+  }
   if (fields.provider.value === "ollama") {
     if (fields.modelSelect.value === "__custom__") {
       return fields.modelCustom.value.trim();
@@ -293,6 +307,9 @@ function getCurrentModel() {
 }
 
 function populateModelSelect(selectedModel) {
+  if (!fields.modelSelect || !fields.modelCustom) {
+    return;
+  }
   fields.modelSelect.innerHTML = "";
   const models = [...availableModels];
   if (selectedModel && !models.includes(selectedModel)) {
@@ -322,6 +339,9 @@ function populateModelSelect(selectedModel) {
 }
 
 function updateModelControls() {
+  if (!fields.provider || !fields.modelSelect || !fields.refreshModels || !fields.modelCustom) {
+    return;
+  }
   const isOllama = fields.provider.value === "ollama";
   fields.modelSelect.hidden = !isOllama;
   fields.refreshModels.hidden = !isOllama;
@@ -333,6 +353,9 @@ function updateModelControls() {
 }
 
 async function loadAvailableModels() {
+  if (!fields.provider || !fields.llmBaseUrl) {
+    return;
+  }
   if (fields.provider.value !== "ollama") {
     return;
   }
@@ -354,6 +377,19 @@ async function loadAvailableModels() {
 }
 
 function applySettings(settings) {
+  if (
+    !fields.provider ||
+    !fields.llmBaseUrl ||
+    !fields.systemPrompt ||
+    !fields.temperature ||
+    !fields.topP ||
+    !fields.maxTokens ||
+    !fields.numCtx ||
+    !fields.repeatPenalty ||
+    !fields.seed
+  ) {
+    return;
+  }
   fields.provider.value = settings.provider;
   fields.llmBaseUrl.value = settings.llm_base_url;
   fields.modelCustom.value = settings.model;
@@ -384,7 +420,11 @@ async function loadSettings() {
   const data = await response.json();
   applySettings(data);
   if (fields.provider.value === "ollama") {
-    await loadAvailableModels();
+    try {
+      await loadAvailableModels();
+    } catch (err) {
+      showStatus(`Model list unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   diagnosticsState.rag.enabledCollections = data.enabled_rag_collections || [];
   diagnosticsState.rag.useRag = fields.useRag.checked;
@@ -629,7 +669,7 @@ async function askQuestion() {
   await loadHistory();
 }
 
-el("save-settings").addEventListener("click", async () => {
+bindClick("save-settings", async () => {
   try {
     await saveSettings();
     showStatus("Settings saved.");
@@ -638,7 +678,7 @@ el("save-settings").addEventListener("click", async () => {
   }
 });
 
-el("ask").addEventListener("click", async () => {
+bindClick("ask", async () => {
   try {
     await askQuestion();
   } catch (err) {
@@ -646,13 +686,13 @@ el("ask").addEventListener("click", async () => {
   }
 });
 
-el("refresh-topics").addEventListener("click", async () => {
+bindClick("refresh-topics", async () => {
   showStatus("Refreshing topics...");
   await loadTopics();
   showStatus("Topics refreshed.");
 });
 
-el("copy-diagnostics").addEventListener("click", async () => {
+bindClick("copy-diagnostics", async () => {
   try {
     await copyDiagnostics();
   } catch (err) {
@@ -660,7 +700,7 @@ el("copy-diagnostics").addEventListener("click", async () => {
   }
 });
 
-el("clear-history").addEventListener("click", async () => {
+bindClick("clear-history", async () => {
   try {
     await clearHistory();
   } catch (err) {
@@ -668,7 +708,7 @@ el("clear-history").addEventListener("click", async () => {
   }
 });
 
-el("delete-latest-history").addEventListener("click", async () => {
+bindClick("delete-latest-history", async () => {
   try {
     await deleteLatestHistory();
   } catch (err) {
@@ -676,35 +716,49 @@ el("delete-latest-history").addEventListener("click", async () => {
   }
 });
 
-el("clear-performance-trend").addEventListener("click", () => {
+bindClick("clear-performance-trend", () => {
   clearPerformanceTrend();
 });
 
-fields.provider.addEventListener("change", toggleProviderFields);
-fields.provider.addEventListener("change", async () => {
-  updateModelControls();
-  if (fields.provider.value === "ollama") {
-    await loadAvailableModels();
-  }
-});
-fields.modelSelect.addEventListener("change", () => {
-  updateModelControls();
-});
-fields.refreshModels.addEventListener("click", async () => {
-  try {
-    await loadAvailableModels();
-  } catch (err) {
-    showStatus(`Refresh models failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-});
-fields.useRag.addEventListener("change", () => {
-  diagnosticsState.rag.useRag = fields.useRag.checked;
-  renderDiagnostics();
-});
-fields.temporaryChat.addEventListener("change", () => {
-  diagnosticsState.rag.temporaryChat = fields.temporaryChat.checked;
-  renderDiagnostics();
-});
+if (fields.provider) {
+  fields.provider.addEventListener("change", toggleProviderFields);
+  fields.provider.addEventListener("change", async () => {
+    updateModelControls();
+    if (fields.provider.value === "ollama") {
+      try {
+        await loadAvailableModels();
+      } catch (err) {
+        showStatus(`Model list unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  });
+}
+if (fields.modelSelect) {
+  fields.modelSelect.addEventListener("change", () => {
+    updateModelControls();
+  });
+}
+if (fields.refreshModels) {
+  fields.refreshModels.addEventListener("click", async () => {
+    try {
+      await loadAvailableModels();
+    } catch (err) {
+      showStatus(`Refresh models failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+}
+if (fields.useRag) {
+  fields.useRag.addEventListener("change", () => {
+    diagnosticsState.rag.useRag = fields.useRag.checked;
+    renderDiagnostics();
+  });
+}
+if (fields.temporaryChat) {
+  fields.temporaryChat.addEventListener("change", () => {
+    diagnosticsState.rag.temporaryChat = fields.temporaryChat.checked;
+    renderDiagnostics();
+  });
+}
 
 async function checkHealth() {
   try {
@@ -732,6 +786,9 @@ async function loadMeta() {
     const appName = meta.app_name || "Chat Hacksman";
     const version = meta.version || "unknown";
     const repoUrl = meta.repo_url || "";
+    if (!fields.footerMeta) {
+      return;
+    }
     if (repoUrl) {
       fields.footerMeta.innerHTML =
         `${appName} v${version} - ` +
@@ -740,9 +797,19 @@ async function loadMeta() {
       fields.footerMeta.textContent = `${appName} v${version}`;
     }
   } catch (err) {
-    fields.footerMeta.textContent = "Chat Hacksman";
+    if (fields.footerMeta) {
+      fields.footerMeta.textContent = "Chat Hacksman";
+    }
     showStatus(`Meta load failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+function bindClick(id, handler) {
+  const node = el(id);
+  if (!node) {
+    return;
+  }
+  node.addEventListener("click", handler);
 }
 
 async function bootstrap() {
