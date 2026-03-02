@@ -244,10 +244,29 @@ async def pull_model(request: ModelPullRequest) -> ModelPullResponse:
 @app.get("/api/topics")
 async def get_topics() -> dict[str, list[str]]:
     try:
-        return await topics_service.get_topics()
+        topics = await topics_service.get_topics()
+        events = topics_service.get_cached_events()
+        occurrences = topics_service.get_cached_occurrences()
+        if events:
+            stored_count = storage.upsert_events(events)
+            logger.info("Stored events from feed count=%d", stored_count)
+        if occurrences:
+            stored_occurrences = storage.upsert_occurrences(occurrences)
+            logger.info("Stored occurrences from feed count=%d", stored_occurrences)
+        return topics
     except Exception as exc:
         logger.exception("Topics feed request failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Failed to load topics feed: {exc}") from exc
+
+
+@app.get("/api/events")
+async def get_events(limit: int = Query(default=200, ge=1, le=1000)):
+    return storage.get_events(limit=limit)
+
+
+@app.get("/api/occurrences")
+async def get_occurrences(limit: int = Query(default=500, ge=1, le=5000)):
+    return storage.get_occurrences(limit=limit)
 
 
 @app.get("/api/history")

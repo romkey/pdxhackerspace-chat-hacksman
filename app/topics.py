@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any
 
@@ -52,6 +52,9 @@ def parse_topics_payload(payload: Any) -> dict[str, list[str]]:
     if not interests and not training_topics:
         # Flexible fallback for unknown payloads.
         fallback = _unique_sorted(_to_topic_strings(payload.get("topics", [])))
+        if not fallback:
+            # events.json fallback: derive topics from event titles
+            fallback = _unique_sorted(_to_topic_strings(payload.get("events", [])))
         return {"interests": fallback, "training_topics": [], "all_topics": fallback}
 
     all_topics = _unique_sorted(interests + training_topics)
@@ -67,6 +70,8 @@ class TopicsService:
     topics_url: str
     ttl_seconds: int
     _cache_data: dict[str, list[str]] | None = None
+    _cache_events: list[dict[str, Any]] = field(default_factory=list)
+    _cache_occurrences: list[dict[str, Any]] = field(default_factory=list)
     _cache_expires_at: float = 0.0
 
     async def get_topics(self) -> dict[str, list[str]]:
@@ -86,7 +91,15 @@ class TopicsService:
             payload = response.json()
 
         parsed = parse_topics_payload(payload)
+        events = payload.get("events", []) if isinstance(payload, dict) else []
+        occurrences = payload.get("occurrences", []) if isinstance(payload, dict) else []
+        if not isinstance(events, list):
+            events = []
+        if not isinstance(occurrences, list):
+            occurrences = []
         self._cache_data = parsed
+        self._cache_events = [item for item in events if isinstance(item, dict)]
+        self._cache_occurrences = [item for item in occurrences if isinstance(item, dict)]
         self._cache_expires_at = now + max(1, self.ttl_seconds)
         logger.info(
             "Loaded topics feed (interests=%d, training_topics=%d, all=%d)",
@@ -94,4 +107,15 @@ class TopicsService:
             len(parsed["training_topics"]),
             len(parsed["all_topics"]),
         )
+        logger.info(
+            "Loaded feed records events=%d occurrences=%d",
+            len(self._cache_events),
+            len(self._cache_occurrences),
+        )
         return parsed
+
+    def get_cached_events(self) -> list[dict[str, Any]]:
+        return self._cache_events or []
+
+    def get_cached_occurrences(self) -> list[dict[str, Any]]:
+        return self._cache_occurrences or []

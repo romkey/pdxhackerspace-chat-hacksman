@@ -25,3 +25,15 @@ def test_parse_topics_payload_dedupes_and_supports_camel_case_training_key() -> 
     }
     parsed = parse_topics_payload(payload)
     assert parsed["all_topics"] == ["Admin", "Laser", "soldering"]
+
+
+def test_parse_topics_payload_falls_back_to_event_titles() -> None:
+    payload = {
+        "events": [
+            {"title": "Dorkbot"},
+            {"name": "Exploit Workshop"},
+            {"title": "dorkbot"},
+        ]
+    }
+    parsed = parse_topics_payload(payload)
+    assert parsed["all_topics"] == ["Dorkbot", "Exploit Workshop"]

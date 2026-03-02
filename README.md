@@ -6,6 +6,8 @@ Web-based chatbot with:
 - Configurable prompt/model/provider in the UI, persisted across runs.
 - Per-collection Qdrant enable/disable checkboxes in the UI, persisted across runs.
 - Topic buttons loaded from a JSON feed (default: `https://members.pdxhackerspace.org/rag.json`).
+- If feed includes `events` (for example `https://events.pdxhackerspace.org/events.json`), events are persisted in SQLite.
+- If feed includes `occurrences`, those are persisted too.
 - Ollama and llama.cpp-compatible chat modes.
 - History tracking for settings snapshot, prompt, question, and response.
 - Docker, GitHub Actions CI, and image publishing.
@@ -35,6 +37,8 @@ See `.env.example`. Key vars:
 
 - `RAG_COLLECTIONS` as a comma-separated list, or `RAG_COLLECTION_1..3`.
 - `RAG_TOPICS_URL` for topic feed buttons.
+- `GET /api/events` returns stored events from the feed.
+- `GET /api/occurrences` returns stored occurrences from the feed.
 - `DEFAULT_PROVIDER` (`ollama` or `llama_cpp`).
 - `DEFAULT_LLM_BASE_URL`, `DEFAULT_MODEL`, `DEFAULT_SYSTEM_PROMPT`.
 - `LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, ...).

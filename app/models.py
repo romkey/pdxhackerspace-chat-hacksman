@@ -64,6 +64,36 @@ class MetaResponse(BaseModel):
     repo_url: str
 
 
+class EventRecord(BaseModel):
+    event_id: int
+    slug: str
+    title: str
+    description: str
+    more_info_url: str
+    visibility: str
+    open_to: str
+    recurrence_type: str
+    start_time: str
+    duration: int
+    payload: dict[str, Any]
+
+
+class OccurrenceRecord(BaseModel):
+    occurrence_id: int
+    slug: str
+    occurs_at: str
+    occurs_at_unix: int
+    ends_at_unix: int
+    duration: int
+    is_cancelled: bool
+    is_postponed: bool
+    in_progress: bool
+    postponed_until: str | None
+    open_to: str
+    event_id: int | None
+    payload: dict[str, Any]
+
+
 class ContextChunk(BaseModel):
     collection: str
     score: float
