@@ -76,44 +76,70 @@ function showStatus(msg) {
 
 function initHelpTips() {
   const tipButtons = Array.from(document.querySelectorAll(".help-tip"));
+  let tooltip = document.getElementById("floating-help-tooltip");
+  if (!tooltip) {
+    tooltip = document.createElement("div");
+    tooltip.id = "floating-help-tooltip";
+    tooltip.className = "floating-tooltip";
+    tooltip.hidden = true;
+    document.body.appendChild(tooltip);
+  }
+  let activeButton = null;
+
+  const hideTooltip = () => {
+    tooltip.hidden = true;
+    if (activeButton) {
+      activeButton.setAttribute("aria-expanded", "false");
+      activeButton = null;
+    }
+  };
+
+  const showTooltipForButton = (button) => {
+    const text = button.dataset.help || "No help available.";
+    tooltip.textContent = text;
+    const rect = button.getBoundingClientRect();
+    tooltip.hidden = false;
+
+    const margin = 8;
+    let top = rect.bottom + margin;
+    let left = rect.left;
+    const tooltipRect = tooltip.getBoundingClientRect();
+    if (left + tooltipRect.width > window.innerWidth - margin) {
+      left = Math.max(margin, window.innerWidth - tooltipRect.width - margin);
+    }
+    if (top + tooltipRect.height > window.innerHeight - margin) {
+      top = Math.max(margin, rect.top - tooltipRect.height - margin);
+    }
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+  };
+
   const hideAll = () => {
-    tipButtons.forEach((button) => {
-      const tipId = button.dataset.tipId;
-      if (!tipId) {
-        return;
-      }
-      const tip = el(tipId);
-      if (!tip) {
-        return;
-      }
-      tip.hidden = true;
-      button.setAttribute("aria-expanded", "false");
-    });
+    hideTooltip();
   };
 
   tipButtons.forEach((button) => {
-    const tipId = button.dataset.tipId;
-    if (!tipId) {
-      return;
-    }
-    const tip = el(tipId);
-    if (!tip) {
+    if (!button.dataset.help) {
       return;
     }
     button.setAttribute("aria-label", "Show help");
     button.setAttribute("aria-expanded", "false");
     button.addEventListener("click", (event) => {
       event.stopPropagation();
-      const wasHidden = tip.hidden;
-      hideAll();
-      if (wasHidden) {
-        tip.hidden = false;
-        button.setAttribute("aria-expanded", "true");
+      if (activeButton === button && !tooltip.hidden) {
+        hideTooltip();
+        return;
       }
+      hideTooltip();
+      activeButton = button;
+      button.setAttribute("aria-expanded", "true");
+      showTooltipForButton(button);
     });
   });
 
   document.addEventListener("click", hideAll);
+  window.addEventListener("resize", hideAll);
+  window.addEventListener("scroll", hideAll, true);
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       hideAll();
@@ -769,6 +795,7 @@ if (fields.modelSelect) {
 if (fields.refreshModels) {
   fields.refreshModels.addEventListener("click", async () => {
     try {
+      showStatus("Refreshing Ollama model list...");
       await loadAvailableModels();
     } catch (err) {
       showStatus(`Refresh models failed: ${err instanceof Error ? err.message : String(err)}`);
