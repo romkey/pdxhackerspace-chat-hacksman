@@ -6,7 +6,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.models import AppSettings, EventRecord, HistoryRecord, OccurrenceRecord
+from app.models import (
+    AppSettings,
+    EventRecord,
+    FeedbackCreateRequest,
+    FeedbackRecord,
+    HistoryRecord,
+    OccurrenceRecord,
+)
 
 
 class Storage:
@@ -89,6 +96,21 @@ class Storage:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    rating TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    history_id INTEGER,
+                    question TEXT NOT NULL,
+                    answer TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
 
     def get_settings(self) -> AppSettings:
@@ -129,10 +151,10 @@ class Storage:
         rag_collections: list[str],
         rag_hits: int,
         config_snapshot: dict[str, Any],
-    ) -> None:
+    ) -> int:
         created_at = datetime.now(UTC).isoformat()
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO chat_history (
                     created_at,
@@ -160,6 +182,8 @@ class Storage:
                 ),
             )
             conn.commit()
+            row_id = cursor.lastrowid
+            return int(row_id) if row_id is not None else 0
 
     def get_history(self, *, limit: int = 100) -> list[HistoryRecord]:
         safe_limit = max(1, min(limit, 500))
@@ -223,6 +247,78 @@ class Storage:
             )
             conn.commit()
             return int(cursor.rowcount or 0)
+
+    def append_feedback(self, feedback: FeedbackCreateRequest) -> int:
+        created_at = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO chat_feedback (
+                    created_at,
+                    rating,
+                    text,
+                    history_id,
+                    question,
+                    answer,
+                    provider,
+                    model
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    created_at,
+                    feedback.rating,
+                    feedback.text.strip(),
+                    feedback.history_id,
+                    feedback.question.strip(),
+                    feedback.answer.strip(),
+                    feedback.provider.strip(),
+                    feedback.model.strip(),
+                ),
+            )
+            conn.commit()
+            row_id = cursor.lastrowid
+            return int(row_id) if row_id is not None else 0
+
+    def get_feedback(self, *, limit: int = 100) -> list[FeedbackRecord]:
+        safe_limit = max(1, min(limit, 500))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    created_at,
+                    rating,
+                    text,
+                    history_id,
+                    question,
+                    answer,
+                    provider,
+                    model
+                FROM chat_feedback
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+
+        records: list[FeedbackRecord] = []
+        for row in rows:
+            rating = "up" if row["rating"] == "up" else "down"
+            records.append(
+                FeedbackRecord(
+                    id=row["id"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                    rating=rating,
+                    text=row["text"],
+                    history_id=row["history_id"],
+                    question=row["question"],
+                    answer=row["answer"],
+                    provider=row["provider"],
+                    model=row["model"],
+                )
+            )
+        return records
 
     def upsert_events(self, events: list[dict[str, Any]]) -> int:
         if not events:

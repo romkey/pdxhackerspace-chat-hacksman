@@ -46,6 +46,11 @@
       #response, #history, #diagnostics, #metrics { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
       #performance-chart { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; color: #d1d5db; }
       .history-item { border: 1px solid #374151; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.75rem; background: #111827; }
+      .feedback-row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.5rem; }
+      .feedback-row button { min-width: 2.25rem; }
+      .feedback-row button.secondary { background: #374151; border-color: #4b5563; }
+      .feedback-row button.selected { background: #1d4ed8; border-color: #1d4ed8; }
+      .feedback-row textarea { min-height: 2.5rem; flex: 1 1 260px; }
       .history-meta { color: #9ca3af; font-size: 0.8rem; margin-bottom: 0.4rem; }
       .history-qa { margin: 0; white-space: pre-wrap; }
       .muted { color: #9ca3af; font-size: 0.85rem; }
@@ -173,7 +178,9 @@
             <button class="help-tip" data-help="When enabled, relevant chunks from selected Qdrant collections are injected into context." type="button">?</button>
           </label>
         </div>
-        <div class="row">
+        <h4>Recorded Chats</h4>
+        <p class="muted">Chats are recorded by default and appear in History below.</p>
+        <div class="feedback-row">
           <label class="muted label-with-help">
             <input id="temporary-chat" type="checkbox" /> Temporary Chat (do not save)
             <button class="help-tip" data-help="Process this chat normally but do not persist it to history." type="button">?</button>
@@ -181,6 +188,13 @@
         </div>
         <h4>Response</h4>
         <div id="response"></div>
+        <div class="feedback-row">
+          <button id="feedback-up" class="secondary" type="button" title="Thumbs up">👍</button>
+          <button id="feedback-down" class="secondary" type="button" title="Thumbs down">👎</button>
+          <textarea id="feedback-text" placeholder="Optional feedback text..."></textarea>
+          <button id="submit-feedback" type="button">Save Feedback</button>
+        </div>
+        <p id="feedback-status" class="muted"></p>
         <div class="button-row">
           <h4>Performance</h4>
           <button id="clear-performance-trend" type="button">Clear Trend</button>
@@ -194,6 +208,11 @@
           <button id="clear-history" type="button">Clear History</button>
         </div>
         <div id="history"></div>
+        <div class="button-row">
+          <h4>Feedback</h4>
+          <button id="refresh-feedback" type="button">Refresh Feedback</button>
+        </div>
+        <div id="feedback-list"></div>
         <div class="row">
           <h4>Diagnostics</h4>
           <button id="copy-diagnostics" type="button">Copy Diagnostics</button>

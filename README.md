@@ -10,6 +10,7 @@ Web-based chatbot with:
 - If feed includes `occurrences`, those are persisted too.
 - Ollama and llama.cpp-compatible chat modes.
 - History tracking for settings snapshot, prompt, question, and response.
+- Feedback tracking with thumbs up/down and optional notes.
 - Docker, GitHub Actions CI, and image publishing.
 
 ## Quick Start (Local)

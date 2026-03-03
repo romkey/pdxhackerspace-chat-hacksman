@@ -111,6 +111,7 @@ class ChatResponse(BaseModel):
     answer: str
     context: list[ContextChunk] = Field(default_factory=list)
     metrics: dict[str, Any] = Field(default_factory=dict)
+    history_id: int | None = None
 
 
 class HistoryRecord(BaseModel):
@@ -124,3 +125,25 @@ class HistoryRecord(BaseModel):
     rag_collections: list[str]
     rag_hits: int
     config_snapshot: dict[str, Any]
+
+
+class FeedbackCreateRequest(BaseModel):
+    rating: Literal["up", "down"]
+    text: str = Field(default="", max_length=4000)
+    history_id: int | None = None
+    question: str = Field(default="", max_length=8000)
+    answer: str = Field(default="", max_length=16000)
+    provider: str = Field(default="", max_length=200)
+    model: str = Field(default="", max_length=200)
+
+
+class FeedbackRecord(BaseModel):
+    id: int
+    created_at: datetime
+    rating: Literal["up", "down"]
+    text: str
+    history_id: int | None
+    question: str
+    answer: str
+    provider: str
+    model: str

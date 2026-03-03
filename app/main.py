@@ -22,6 +22,7 @@ from app.models import (
     AppSettings,
     ChatRequest,
     ChatResponse,
+    FeedbackCreateRequest,
     MetaResponse,
     ModelPullRequest,
     ModelPullResponse,
@@ -108,6 +109,23 @@ def _basic_auth_enabled() -> bool:
     return bool(config.basic_auth_username and config.basic_auth_password)
 
 
+def _client_ip_from_request(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        first_ip = forwarded_for.split(",", 1)[0].strip()
+        if first_ip:
+            return first_ip
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip
+    cf_ip = request.headers.get("cf-connecting-ip", "").strip()
+    if cf_ip:
+        return cf_ip
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
 def _basic_auth_valid(authorization_header: str | None) -> bool:
     if not _basic_auth_enabled():
         return True
@@ -136,12 +154,19 @@ def _basic_auth_valid(authorization_header: str | None) -> bool:
 
 @app.middleware("http")
 async def optional_basic_auth(request: Request, call_next):
+    client_ip = _client_ip_from_request(request)
     if not _basic_auth_enabled():
         return await call_next(request)
     if request.url.path == "/health" or request.method == "OPTIONS":
         return await call_next(request)
     if _basic_auth_valid(request.headers.get("Authorization")):
         return await call_next(request)
+    logger.warning(
+        "Unauthorized request blocked path=%s method=%s client_ip=%s",
+        request.url.path,
+        request.method,
+        client_ip,
+    )
     return Response(
         content="Unauthorized",
         status_code=401,
@@ -332,6 +357,25 @@ async def get_history(limit: int = Query(default=50, ge=1, le=500)):
     return storage.get_history(limit=limit)
 
 
+@app.get("/api/feedback")
+async def get_feedback(limit: int = Query(default=50, ge=1, le=500)):
+    return storage.get_feedback(limit=limit)
+
+
+@app.post("/api/feedback")
+async def post_feedback(request: FeedbackCreateRequest, http_request: Request) -> dict[str, int]:
+    client_ip = _client_ip_from_request(http_request)
+    feedback_id = storage.append_feedback(request)
+    logger.info(
+        "Recorded feedback id=%s rating=%s history_id=%s client_ip=%s",
+        feedback_id,
+        request.rating,
+        request.history_id,
+        client_ip,
+    )
+    return {"id": feedback_id}
+
+
 @app.delete("/api/history")
 async def delete_history() -> dict[str, int]:
     deleted_rows = storage.clear_history()
@@ -347,8 +391,9 @@ async def delete_latest_history() -> dict[str, int]:
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def post_chat(request: ChatRequest) -> ChatResponse:
+async def post_chat(request: ChatRequest, http_request: Request) -> ChatResponse:
     request_started = perf_counter()
+    client_ip = _client_ip_from_request(http_request)
     settings = storage.get_settings()
     enabled_collections = [
         collection
@@ -358,16 +403,17 @@ async def post_chat(request: ChatRequest) -> ChatResponse:
     rag_started = perf_counter()
     if request.use_rag:
         logger.info(
-            "Chat request using RAG=%s enabled_collections=%s",
+            "Chat request using RAG=%s enabled_collections=%s client_ip=%s",
             request.use_rag,
             ",".join(enabled_collections) if enabled_collections else "(none)",
+            client_ip,
         )
         context = await rag_service.retrieve(
             request.question,
             enabled_collections=enabled_collections,
         )
     else:
-        logger.info("Chat request with RAG disabled")
+        logger.info("Chat request with RAG disabled client_ip=%s", client_ip)
         context = []
     rag_latency_ms = (perf_counter() - rag_started) * 1000.0
 
@@ -399,10 +445,11 @@ async def post_chat(request: ChatRequest) -> ChatResponse:
         "provider_metrics": llm_result.provider_metrics,
     }
 
+    history_id: int | None = None
     if request.temporary_chat:
         logger.info("Temporary chat mode enabled; skipping history persistence")
     else:
-        storage.append_history(
+        history_id = storage.append_history(
             provider=settings.provider,
             model=settings.model,
             system_prompt=settings.system_prompt,
@@ -412,7 +459,12 @@ async def post_chat(request: ChatRequest) -> ChatResponse:
             rag_hits=len(context),
             config_snapshot={**settings.model_dump(), "last_metrics": metrics},
         )
-    return ChatResponse(answer=llm_result.answer, context=context, metrics=metrics)
+    return ChatResponse(
+        answer=llm_result.answer,
+        context=context,
+        metrics=metrics,
+        history_id=history_id if history_id else None,
+    )
 
 
 def main() -> None:

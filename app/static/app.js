@@ -21,6 +21,13 @@ const fields = {
   metrics: el("metrics"),
   performanceChart: el("performance-chart"),
   history: el("history"),
+  feedbackList: el("feedback-list"),
+  feedbackUp: el("feedback-up"),
+  feedbackDown: el("feedback-down"),
+  feedbackText: el("feedback-text"),
+  submitFeedback: el("submit-feedback"),
+  refreshFeedback: el("refresh-feedback"),
+  feedbackStatus: el("feedback-status"),
   diagnostics: el("diagnostics"),
   footerMeta: el("footer-meta"),
   topicButtons: el("topic-buttons"),
@@ -32,6 +39,8 @@ const fields = {
 };
 let availableRagCollections = [];
 let availableModels = [];
+let selectedFeedbackRating = null;
+let lastResponseForFeedback = null;
 const PERFORMANCE_HISTORY_LIMIT = 20;
 const diagnosticsState = {
   health: { status: "unknown", checkedAt: null, error: null },
@@ -71,6 +80,12 @@ function isoNow() {
 function showStatus(msg) {
   if (fields.status) {
     fields.status.textContent = msg;
+  }
+}
+
+function showFeedbackStatus(msg) {
+  if (fields.feedbackStatus) {
+    fields.feedbackStatus.textContent = msg;
   }
 }
 
@@ -489,7 +504,7 @@ function renderRagCollectionCheckboxes(availableCollections, enabledCollections)
   fields.ragCollections.innerHTML = "";
   if (!availableCollections.length) {
     fields.ragCollections.textContent =
-      "No Qdrant collections configured. Set RAG_COLLECTIONS or RAG_COLLECTION_1..3.";
+      "No Qdrant collections configured. Set RAG_COLLECTIONS or RAG_COLLECTION_1..5.";
     return;
   }
 
@@ -620,6 +635,93 @@ async function loadHistory() {
   });
 }
 
+function updateFeedbackButtons() {
+  if (fields.feedbackUp) {
+    fields.feedbackUp.classList.toggle("selected", selectedFeedbackRating === "up");
+  }
+  if (fields.feedbackDown) {
+    fields.feedbackDown.classList.toggle("selected", selectedFeedbackRating === "down");
+  }
+}
+
+function setFeedbackRating(rating) {
+  selectedFeedbackRating = selectedFeedbackRating === rating ? null : rating;
+  updateFeedbackButtons();
+}
+
+async function submitFeedback() {
+  if (!lastResponseForFeedback) {
+    showFeedbackStatus("Ask a question first so there is a response to rate.");
+    return;
+  }
+  if (!selectedFeedbackRating) {
+    showFeedbackStatus("Choose thumbs up or thumbs down first.");
+    return;
+  }
+
+  const payload = {
+    rating: selectedFeedbackRating,
+    text: fields.feedbackText ? fields.feedbackText.value.trim() : "",
+    history_id: lastResponseForFeedback.historyId,
+    question: lastResponseForFeedback.question,
+    answer: lastResponseForFeedback.answer,
+    provider: lastResponseForFeedback.provider,
+    model: lastResponseForFeedback.model,
+  };
+  const response = await fetch("/api/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  if (fields.feedbackText) {
+    fields.feedbackText.value = "";
+  }
+  selectedFeedbackRating = null;
+  updateFeedbackButtons();
+  showFeedbackStatus("Feedback saved.");
+  await loadFeedback();
+}
+
+async function loadFeedback() {
+  if (!fields.feedbackList) {
+    return;
+  }
+  const response = await fetch("/api/feedback?limit=50");
+  if (!response.ok) {
+    fields.feedbackList.textContent = "Unable to load feedback.";
+    return;
+  }
+  const rows = await response.json();
+  fields.feedbackList.innerHTML = "";
+  if (!rows.length) {
+    fields.feedbackList.textContent = "No feedback yet.";
+    return;
+  }
+
+  rows.forEach((item) => {
+    const wrapper = document.createElement("article");
+    wrapper.className = "history-item";
+
+    const meta = document.createElement("div");
+    meta.className = "history-meta";
+    const rating = item.rating === "up" ? "👍" : "👎";
+    const linkPart = item.history_id ? ` | history_id=${item.history_id}` : "";
+    meta.textContent = `${item.created_at} | ${rating} ${item.provider}/${item.model}${linkPart}`;
+    wrapper.appendChild(meta);
+
+    const qa = document.createElement("pre");
+    qa.className = "history-qa";
+    const note = item.text ? `Feedback: ${item.text}\n\n` : "";
+    qa.textContent = `${note}Q: ${item.question}\n\nA: ${item.answer}`;
+    wrapper.appendChild(qa);
+
+    fields.feedbackList.appendChild(wrapper);
+  });
+}
+
 async function clearHistory() {
   if (!window.confirm("Clear all saved chat history? This cannot be undone.")) {
     return;
@@ -687,10 +789,22 @@ async function askQuestion() {
     renderDiagnostics();
     renderMetrics();
     showStatus("Chat request failed.");
+    lastResponseForFeedback = null;
+    showFeedbackStatus("");
     return;
   }
   const data = await response.json();
   fields.response.textContent = data.answer;
+  lastResponseForFeedback = {
+    question,
+    answer: data.answer,
+    historyId: data.history_id ?? null,
+    provider: fields.provider ? fields.provider.value : "",
+    model: getCurrentModel(),
+  };
+  selectedFeedbackRating = null;
+  updateFeedbackButtons();
+  showFeedbackStatus("");
   diagnosticsState.rag.lastContextChunks = (data.context || []).length;
   diagnosticsState.rag.lastContextCollections = Array.from(
     new Set((data.context || []).map((chunk) => chunk.collection))
@@ -721,6 +835,7 @@ async function askQuestion() {
     `Done. Context chunks used: ${data.context.length}. Latency: ${data.metrics?.total_latency_ms ?? "n/a"} ms${fields.temporaryChat.checked ? " (temporary, not saved)" : ""}`
   );
   await loadHistory();
+  await loadFeedback();
 }
 
 bindClick("save-settings", async () => {
@@ -774,6 +889,31 @@ bindClick("clear-performance-trend", () => {
   clearPerformanceTrend();
 });
 
+bindClick("feedback-up", () => {
+  setFeedbackRating("up");
+});
+
+bindClick("feedback-down", () => {
+  setFeedbackRating("down");
+});
+
+bindClick("submit-feedback", async () => {
+  try {
+    await submitFeedback();
+  } catch (err) {
+    showFeedbackStatus(`Save feedback failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+});
+
+bindClick("refresh-feedback", async () => {
+  try {
+    await loadFeedback();
+    showFeedbackStatus("Feedback list refreshed.");
+  } catch (err) {
+    showFeedbackStatus(`Refresh feedback failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+});
+
 if (fields.provider) {
   fields.provider.addEventListener("change", toggleProviderFields);
   fields.provider.addEventListener("change", async () => {
@@ -821,6 +961,19 @@ if (fields.temporaryChat) {
   fields.temporaryChat.addEventListener("change", () => {
     diagnosticsState.rag.temporaryChat = fields.temporaryChat.checked;
     renderDiagnostics();
+  });
+}
+if (fields.question) {
+  fields.question.addEventListener("keydown", async (event) => {
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing) {
+      return;
+    }
+    event.preventDefault();
+    try {
+      await askQuestion();
+    } catch (err) {
+      showStatus(err instanceof Error ? err.message : String(err));
+    }
   });
 }
 
@@ -887,6 +1040,7 @@ async function bootstrap() {
   await loadSettings();
   await loadTopics();
   await loadHistory();
+  await loadFeedback();
   showStatus("Ready.");
 }
 

@@ -76,6 +76,7 @@ def test_chat_endpoint_records_history(monkeypatch) -> None:
         body = response.json()
         assert "safety glasses" in body["answer"].lower()
         assert body["metrics"]["completion_tokens"] == 5
+        assert isinstance(body["history_id"], int)
 
         history_resp = client.get("/api/history?limit=1")
         assert history_resp.status_code == 200
@@ -217,11 +218,65 @@ def test_optional_basic_auth_protects_routes(monkeypatch) -> None:
         assert unauthorized.status_code == 401
         assert unauthorized.headers.get("www-authenticate") == 'Basic realm="Chat Hacksman"'
 
+        unauthorized_root = client.get("/")
+        assert unauthorized_root.status_code == 401
+
+        unauthorized_static = client.get("/static/app.js")
+        assert unauthorized_static.status_code == 401
+
         authorized = client.get("/api/settings", headers=headers)
         assert authorized.status_code == 200
 
         health = client.get("/health")
         assert health.status_code == 200
+
+
+def test_feedback_endpoint_records_and_returns_feedback(monkeypatch) -> None:
+    async def fake_retrieve(self, _: str, enabled_collections=None):  # noqa: ANN001
+        del self, enabled_collections
+        return []
+
+    async def fake_chat(self, *, settings, question, context):  # noqa: ANN001
+        del self, settings, question, context
+        return SimpleNamespace(
+            answer="answer",
+            input_tokens=1,
+            output_tokens=1,
+            total_tokens=2,
+            llm_latency_ms=1.0,
+            tokens_per_second=1000.0,
+            provider_metrics={},
+        )
+
+    monkeypatch.setattr(type(rag_service), "retrieve", fake_retrieve)
+    monkeypatch.setattr(type(llm_service), "chat", fake_chat)
+
+    with TestClient(app) as client:
+        chat_resp = client.post("/api/chat", json={"question": "ping", "use_rag": False})
+        assert chat_resp.status_code == 200
+        history_id = chat_resp.json()["history_id"]
+
+        feedback_resp = client.post(
+            "/api/feedback",
+            json={
+                "rating": "up",
+                "text": "helpful response",
+                "history_id": history_id,
+                "question": "ping",
+                "answer": "answer",
+                "provider": "ollama",
+                "model": "llama3.2:latest",
+            },
+        )
+        assert feedback_resp.status_code == 200
+        assert isinstance(feedback_resp.json()["id"], int)
+
+        list_resp = client.get("/api/feedback?limit=10")
+        assert list_resp.status_code == 200
+        rows = list_resp.json()
+        assert rows
+        assert rows[0]["rating"] == "up"
+        assert rows[0]["text"] == "helpful response"
 
 
 def test_models_endpoint_returns_ollama_model_list(monkeypatch) -> None:
