@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -202,6 +203,25 @@ def test_chat_endpoint_returns_502_when_llm_fails(monkeypatch) -> None:
         response = client.post("/api/chat", json={"question": "ping", "use_rag": False})
         assert response.status_code == 502
         assert response.json()["detail"] == "model transport failed"
+
+
+def test_optional_basic_auth_protects_routes(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.config, "basic_auth_username", "alice")
+    monkeypatch.setattr(main_module.config, "basic_auth_password", "wonderland")
+
+    token = base64.b64encode(b"alice:wonderland").decode("ascii")
+    headers = {"Authorization": f"Basic {token}"}
+
+    with TestClient(app) as client:
+        unauthorized = client.get("/api/settings")
+        assert unauthorized.status_code == 401
+        assert unauthorized.headers.get("www-authenticate") == 'Basic realm="Chat Hacksman"'
+
+        authorized = client.get("/api/settings", headers=headers)
+        assert authorized.status_code == 200
+
+        health = client.get("/health")
+        assert health.status_code == 200
 
 
 def test_models_endpoint_returns_ollama_model_list(monkeypatch) -> None:

@@ -29,13 +29,21 @@ class AppConfig:
     default_llm_base_url: str
     default_model: str
     default_system_prompt: str
+    basic_auth_username: str | None
+    basic_auth_password: str | None
     log_level: str
     repo_url: str
 
 
 def load_config() -> AppConfig:
     collections = _split_collections(os.getenv("RAG_COLLECTIONS", ""))
-    for key in ("RAG_COLLECTION_1", "RAG_COLLECTION_2", "RAG_COLLECTION_3"):
+    for key in (
+        "RAG_COLLECTION_1",
+        "RAG_COLLECTION_2",
+        "RAG_COLLECTION_3",
+        "RAG_COLLECTION_4",
+        "RAG_COLLECTION_5",
+    ):
         value = os.getenv(key, "").strip()
         if value:
             collections.append(value)
@@ -66,6 +74,8 @@ def load_config() -> AppConfig:
             "DEFAULT_SYSTEM_PROMPT",
             "You are Chat Hacksman, an expert assistant for hackerspace members.",
         ),
+        basic_auth_username=os.getenv("BASIC_AUTH_USERNAME") or None,
+        basic_auth_password=os.getenv("BASIC_AUTH_PASSWORD") or None,
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         repo_url=os.getenv(
             "REPO_URL",

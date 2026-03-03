@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
+import secrets
 import tomllib
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
@@ -8,9 +11,9 @@ from pathlib import Path
 from time import perf_counter
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.config import load_config
@@ -63,6 +66,11 @@ logger.info(
     "Configured Qdrant collections from env: %s",
     ",".join(config.rag_collections) if config.rag_collections else "(none)",
 )
+if bool(config.basic_auth_username) ^ bool(config.basic_auth_password):
+    logger.warning(
+        "Basic auth partially configured; set both BASIC_AUTH_USERNAME and BASIC_AUTH_PASSWORD "
+        "to enable authentication."
+    )
 
 
 def _detect_app_version() -> str:
@@ -94,6 +102,51 @@ app.add_middleware(
 
 static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+
+def _basic_auth_enabled() -> bool:
+    return bool(config.basic_auth_username and config.basic_auth_password)
+
+
+def _basic_auth_valid(authorization_header: str | None) -> bool:
+    if not _basic_auth_enabled():
+        return True
+    if not authorization_header:
+        return False
+    try:
+        scheme, encoded = authorization_header.split(" ", 1)
+    except ValueError:
+        return False
+    if scheme.lower() != "basic":
+        return False
+    try:
+        decoded = base64.b64decode(encoded.strip(), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return False
+    if ":" not in decoded:
+        return False
+    username, password = decoded.split(":", 1)
+    return bool(
+        config.basic_auth_username
+        and config.basic_auth_password
+        and secrets.compare_digest(username, config.basic_auth_username)
+        and secrets.compare_digest(password, config.basic_auth_password)
+    )
+
+
+@app.middleware("http")
+async def optional_basic_auth(request: Request, call_next):
+    if not _basic_auth_enabled():
+        return await call_next(request)
+    if request.url.path == "/health" or request.method == "OPTIONS":
+        return await call_next(request)
+    if _basic_auth_valid(request.headers.get("Authorization")):
+        return await call_next(request)
+    return Response(
+        content="Unauthorized",
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="Chat Hacksman"'},
+    )
 
 
 @app.get("/")

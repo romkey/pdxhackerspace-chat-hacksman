@@ -2,7 +2,7 @@
 
 Web-based chatbot with:
 
-- Optional RAG from up to 3 Qdrant collections (or none, if unset).
+- Optional RAG from up to 5 Qdrant collections (or none, if unset).
 - Configurable prompt/model/provider in the UI, persisted across runs.
 - Per-collection Qdrant enable/disable checkboxes in the UI, persisted across runs.
 - Topic buttons loaded from a JSON feed (default: `https://members.pdxhackerspace.org/rag.json`).
@@ -35,12 +35,13 @@ Web-based chatbot with:
 
 See `.env.example`. Key vars:
 
-- `RAG_COLLECTIONS` as a comma-separated list, or `RAG_COLLECTION_1..3`.
+- `RAG_COLLECTIONS` as a comma-separated list, or `RAG_COLLECTION_1..5`.
 - `RAG_TOPICS_URL` for topic feed buttons.
 - `GET /api/events` returns stored events from the feed.
 - `GET /api/occurrences` returns stored occurrences from the feed.
 - `DEFAULT_PROVIDER` (`ollama` or `llama_cpp`).
 - `DEFAULT_LLM_BASE_URL`, `DEFAULT_MODEL`, `DEFAULT_SYSTEM_PROMPT`.
+- `BASIC_AUTH_USERNAME` and `BASIC_AUTH_PASSWORD` to enable optional HTTP basic auth.
 - `EMBEDDING_TIMEOUT_SECONDS` for embedding calls used by RAG lookup.
 - `LLM_TIMEOUT_SECONDS`, `LLM_RETRY_ATTEMPTS`, `LLM_RETRY_BACKOFF_SECONDS` to handle transient model server disconnects/timeouts.
 - `LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, ...).
