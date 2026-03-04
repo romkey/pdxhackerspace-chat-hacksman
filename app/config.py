@@ -19,6 +19,7 @@ class AppConfig:
     qdrant_api_key: str | None
     rag_collections: list[str]
     rag_top_k: int
+    rag_min_score: float
     embedding_url: str
     embedding_model: str
     embedding_timeout_seconds: float
@@ -61,6 +62,7 @@ def load_config() -> AppConfig:
         qdrant_api_key=os.getenv("QDRANT_API_KEY") or None,
         rag_collections=deduped_collections,
         rag_top_k=int(os.getenv("RAG_TOP_K", "4")),
+        rag_min_score=float(os.getenv("RAG_MIN_SCORE", "0.5")),
         embedding_url=os.getenv("EMBEDDING_URL", "http://localhost:11434"),
         embedding_model=os.getenv("EMBEDDING_MODEL", "nomic-embed-text"),
         embedding_timeout_seconds=float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "30")),

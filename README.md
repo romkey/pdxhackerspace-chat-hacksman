@@ -37,6 +37,7 @@ Web-based chatbot with:
 See `.env.example`. Key vars:
 
 - `RAG_COLLECTIONS` as a comma-separated list, or `RAG_COLLECTION_1..5`.
+- `RAG_TOP_K` and `RAG_MIN_SCORE` tune retrieval breadth and minimum similarity.
 - `RAG_TOPICS_URL` for topic feed buttons.
 - `GET /api/events` returns stored events from the feed.
 - `GET /api/occurrences` returns stored occurrences from the feed.
@@ -48,6 +49,10 @@ See `.env.example`. Key vars:
 - `LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, ...).
 
 If Qdrant collections are not configured or embedding lookup fails, RAG is skipped gracefully.
+
+For ebook retrieval in `calibre_books`, text is read from `chunk_text` (with fallback keys for other
+collections), retrieval supports both Ollama `/api/embed` and `/api/embeddings`, and `library_summary`
+chunks are always eligible for retrieval.
 
 ## Provider Notes
 

@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
+from qdrant_client.http.models import FieldCondition, Filter, MatchAny
 
 from app.models import ContextChunk
 
@@ -14,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 def _extract_chunk_text(payload: dict[str, Any]) -> str:
-    for key in ("text", "content", "chunk", "document", "body"):
+    for key in ("chunk_text", "text", "content", "chunk", "document", "body"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -30,10 +31,47 @@ class RagService:
     embedding_model: str
     top_k: int
     embedding_timeout_seconds: float = 30.0
+    min_score: float = 0.0
     _collection_vector_dims: dict[str, int | None] = field(default_factory=dict)
+    _client: QdrantClient | None = None
 
     def _make_qdrant_client(self) -> QdrantClient:
         return QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key, timeout=5.0)
+
+    def _get_qdrant_client(self) -> QdrantClient:
+        if self._client is None:
+            self._client = self._make_qdrant_client()
+        return self._client
+
+    async def _embed_query_modern(self, query: str) -> list[float] | None:
+        async with httpx.AsyncClient(timeout=self.embedding_timeout_seconds) as client:
+            response = await client.post(
+                f"{self.embedding_url.rstrip('/')}/api/embed",
+                json={"model": self.embedding_model, "input": [query]},
+            )
+            response.raise_for_status()
+            data = response.json()
+        embeddings = data.get("embeddings")
+        if isinstance(embeddings, list) and embeddings and isinstance(embeddings[0], list):
+            logger.info("Embedding generated via /api/embed with %d dimensions", len(embeddings[0]))
+            return [float(x) for x in embeddings[0]]
+        return None
+
+    async def _embed_query_legacy(self, query: str) -> list[float] | None:
+        async with httpx.AsyncClient(timeout=self.embedding_timeout_seconds) as client:
+            response = await client.post(
+                f"{self.embedding_url.rstrip('/')}/api/embeddings",
+                json={"model": self.embedding_model, "prompt": query},
+            )
+            response.raise_for_status()
+            data = response.json()
+        embedding = data.get("embedding")
+        if isinstance(embedding, list) and embedding:
+            logger.info(
+                "Embedding generated via /api/embeddings with %d dimensions", len(embedding)
+            )
+            return [float(x) for x in embedding]
+        return None
 
     async def _embed_query(self, query: str) -> list[float] | None:
         try:
@@ -42,17 +80,17 @@ class RagService:
                 self.embedding_model,
                 self.embedding_url,
             )
-            async with httpx.AsyncClient(timeout=self.embedding_timeout_seconds) as client:
-                response = await client.post(
-                    f"{self.embedding_url.rstrip('/')}/api/embeddings",
-                    json={"model": self.embedding_model, "prompt": query},
-                )
-                response.raise_for_status()
-                data = response.json()
-            embedding = data.get("embedding")
-            if isinstance(embedding, list) and embedding:
-                logger.info("Embedding generated successfully with %d dimensions", len(embedding))
-                return [float(x) for x in embedding]
+            modern_embedding: list[float] | None = None
+            try:
+                modern_embedding = await self._embed_query_modern(query)
+            except Exception as exc:
+                logger.warning("Modern embed endpoint /api/embed failed: %s", exc)
+            if modern_embedding is not None:
+                return modern_embedding
+            logger.warning("Trying legacy embed endpoint /api/embeddings")
+            legacy_embedding = await self._embed_query_legacy(query)
+            if legacy_embedding is not None:
+                return legacy_embedding
             logger.warning("Embedding response had no usable vector payload")
         except Exception as exc:
             logger.exception("Embedding request failed: %s", exc)
@@ -65,28 +103,90 @@ class RagService:
         client: QdrantClient,
         collection: str,
         vector: list[float],
+        query_filter: Filter | None = None,
     ) -> list[Any]:
         if hasattr(client, "search"):
-            hits = client.search(
-                collection_name=collection,
-                query_vector=vector,
-                with_payload=True,
-                limit=self.top_k,
-            )
+            try:
+                hits = client.search(
+                    collection_name=collection,
+                    query_vector=vector,
+                    query_filter=query_filter,
+                    with_payload=True,
+                    limit=self.top_k,
+                )
+            except TypeError:
+                try:
+                    hits = client.search(
+                        collection_name=collection,
+                        query_vector=vector,
+                        filter=query_filter,
+                        with_payload=True,
+                        limit=self.top_k,
+                    )
+                except TypeError:
+                    hits = client.search(
+                        collection_name=collection,
+                        query_vector=vector,
+                        with_payload=True,
+                        limit=self.top_k,
+                    )
             return list(hits)
 
         if hasattr(client, "query_points"):
-            response = client.query_points(
-                collection_name=collection,
-                query=vector,
-                with_payload=True,
-                limit=self.top_k,
-            )
+            try:
+                response = client.query_points(
+                    collection_name=collection,
+                    query=vector,
+                    query_filter=query_filter,
+                    with_payload=True,
+                    limit=self.top_k,
+                )
+            except TypeError:
+                try:
+                    response = client.query_points(
+                        collection_name=collection,
+                        query=vector,
+                        filter=query_filter,
+                        with_payload=True,
+                        limit=self.top_k,
+                    )
+                except TypeError:
+                    response = client.query_points(
+                        collection_name=collection,
+                        query=vector,
+                        with_payload=True,
+                        limit=self.top_k,
+                    )
             points = getattr(response, "points", response)
             return list(points) if points is not None else []
 
         raise AttributeError(
             "Qdrant client has neither 'search' nor 'query_points'; unsupported version."
+        )
+
+    def _calibre_chunk_types_for_query(self, query: str) -> list[str]:
+        normalized = query.strip().lower()
+        catalog_words = {"books", "book", "library", "catalog", "available", "have", "collection"}
+        passage_words = {"quote", "passage", "chapter", "excerpt", "text", "say", "where"}
+        tokens = set(normalized.split())
+
+        if tokens & catalog_words:
+            return ["book_metadata", "library_summary"]
+        if tokens & passage_words:
+            return ["content", "description", "library_summary"]
+        return ["content", "description", "book_metadata", "library_summary"]
+
+    def _build_collection_filter(self, collection: str, query: str) -> Filter | None:
+        if collection != "calibre_books":
+            return None
+        chunk_types = self._calibre_chunk_types_for_query(query)
+        return Filter(
+            must=[
+                FieldCondition(
+                    key="chunk_type",
+                    match=MatchAny(any=chunk_types),
+                )
+            ]
         )
 
     def _extract_vector_dim(self, collection_info: Any) -> int | None:
@@ -161,7 +261,7 @@ class RagService:
             return []
         query_dim = len(vector)
 
-        client = self._make_qdrant_client()
+        client = self._get_qdrant_client()
         out: list[ContextChunk] = []
         for collection in target_collections:
             expected_dim = self._get_collection_vector_dim(client, collection)
@@ -176,10 +276,12 @@ class RagService:
                 )
                 continue
             try:
+                query_filter = self._build_collection_filter(collection, query)
                 hits = self._search_collection(
                     client=client,
                     collection=collection,
                     vector=vector,
+                    query_filter=query_filter,
                 )
                 logger.info(
                     "Qdrant search succeeded for %s with %d hits",
@@ -206,10 +308,13 @@ class RagService:
                 text = _extract_chunk_text(payload)
                 if not text:
                     continue
+                score = float(hit.score)
+                if score < self.min_score:
+                    continue
                 out.append(
                     ContextChunk(
                         collection=collection,
-                        score=float(hit.score),
+                        score=score,
                         text=text,
                         metadata=payload,
                     )

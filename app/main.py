@@ -56,6 +56,7 @@ rag_service = RagService(
     embedding_url=config.embedding_url,
     embedding_model=config.embedding_model,
     top_k=config.rag_top_k,
+    min_score=config.rag_min_score,
     embedding_timeout_seconds=config.embedding_timeout_seconds,
 )
 llm_service = LlmService(

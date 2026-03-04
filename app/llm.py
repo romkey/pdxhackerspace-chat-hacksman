@@ -25,15 +25,49 @@ class LlmResult:
     provider_metrics: dict[str, Any]
 
 
+def _format_chunk(idx: int, chunk: ContextChunk) -> str:
+    metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
+    if chunk.collection != "calibre_books":
+        return f"[{idx}] collection={chunk.collection} score={chunk.score:.4f}\n{chunk.text}"
+
+    header_parts: list[str] = []
+    title = metadata.get("title")
+    if isinstance(title, str) and title.strip():
+        book_line = f'Book: "{title.strip()}"'
+        authors = metadata.get("authors")
+        if isinstance(authors, list):
+            author_names = [str(item).strip() for item in authors if str(item).strip()]
+            if author_names:
+                book_line += f" by {', '.join(author_names)}"
+        elif isinstance(authors, str) and authors.strip():
+            book_line += f" by {authors.strip()}"
+        header_parts.append(book_line)
+
+    chapter_title = metadata.get("chapter_title")
+    if isinstance(chapter_title, str) and chapter_title.strip():
+        header_parts.append(f"Chapter: {chapter_title.strip()}")
+
+    chunk_type = metadata.get("chunk_type")
+    if isinstance(chunk_type, str) and chunk_type.strip():
+        header_parts.append(f"Type: {chunk_type.strip()}")
+
+    source_url = metadata.get("source_url")
+    if isinstance(source_url, str) and source_url.strip():
+        header_parts.append(f"Source: {source_url.strip()}")
+
+    header_parts.append(f"collection={chunk.collection}")
+    header_parts.append(f"score={chunk.score:.4f}")
+    header = " | ".join(header_parts)
+    return f"[{idx}] {header}\n{chunk.text}"
+
+
 def _build_system_prompt(base_prompt: str, context: list[ContextChunk]) -> str:
     if not context:
         return base_prompt
 
     context_parts = []
     for idx, chunk in enumerate(context, start=1):
-        context_parts.append(
-            f"[{idx}] collection={chunk.collection} score={chunk.score:.4f}\n{chunk.text}"
-        )
+        context_parts.append(_format_chunk(idx, chunk))
     context_block = "\n\n".join(context_parts)
     return (
         f"{base_prompt}\n\n"
