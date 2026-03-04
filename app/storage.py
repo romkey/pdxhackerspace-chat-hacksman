@@ -111,6 +111,14 @@ class Storage:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS llm_base_url_history (
+                    url TEXT PRIMARY KEY,
+                    last_used_at TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
 
     def get_settings(self) -> AppSettings:
@@ -139,6 +147,37 @@ class Storage:
             )
             conn.commit()
         return settings
+
+    def remember_llm_base_url(self, llm_base_url: str) -> None:
+        normalized = llm_base_url.strip()
+        if not normalized:
+            return
+        last_used_at = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO llm_base_url_history (url, last_used_at)
+                VALUES (?, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    last_used_at = excluded.last_used_at
+                """,
+                (normalized, last_used_at),
+            )
+            conn.commit()
+
+    def get_llm_base_urls(self, *, limit: int = 200) -> list[str]:
+        safe_limit = max(1, min(limit, 1000))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT url
+                FROM llm_base_url_history
+                ORDER BY LOWER(url) ASC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return [str(row["url"]) for row in rows]
 
     def append_history(
         self,

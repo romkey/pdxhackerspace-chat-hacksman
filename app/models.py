@@ -46,6 +46,10 @@ class ModelsResponse(BaseModel):
     error: str | None = None
 
 
+class LlmBaseUrlsResponse(BaseModel):
+    urls: list[str]
+
+
 class ModelPullRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     provider: ProviderName | None = None

@@ -38,6 +38,48 @@ def test_settings_round_trip() -> None:
         assert get_resp.json()["system_prompt"] == "Custom prompt"
 
 
+def test_llm_base_url_history_is_remembered_and_sorted() -> None:
+    with TestClient(app) as client:
+        updated_a = {
+            "provider": "ollama",
+            "llm_base_url": "http://zeta.local:11434",
+            "model": "llama3.2:latest",
+            "system_prompt": "Prompt A",
+            "tweaks": {
+                "max_tokens": 512,
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "num_ctx": 4096,
+                "repeat_penalty": 1.1,
+                "seed": None,
+            },
+        }
+        updated_b = {
+            "provider": "ollama",
+            "llm_base_url": "http://alpha.local:11434",
+            "model": "llama3.2:latest",
+            "system_prompt": "Prompt B",
+            "tweaks": {
+                "max_tokens": 512,
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "num_ctx": 4096,
+                "repeat_penalty": 1.1,
+                "seed": None,
+            },
+        }
+
+        assert client.put("/api/settings", json=updated_a).status_code == 200
+        assert client.put("/api/settings", json=updated_b).status_code == 200
+
+        urls_resp = client.get("/api/llm-base-urls?limit=100")
+        assert urls_resp.status_code == 200
+        urls = urls_resp.json()["urls"]
+        assert "http://zeta.local:11434" in urls
+        assert "http://alpha.local:11434" in urls
+        assert urls == sorted(urls, key=lambda item: item.casefold())
+
+
 def test_chat_endpoint_records_history(monkeypatch) -> None:
     async def fake_retrieve(self, _: str, enabled_collections=None):  # noqa: ANN001
         del self

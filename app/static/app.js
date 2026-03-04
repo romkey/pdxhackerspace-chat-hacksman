@@ -3,6 +3,7 @@ const el = (id) => document.getElementById(id);
 const fields = {
   provider: el("provider"),
   llmBaseUrl: el("llm-base-url"),
+  llmBaseUrlCustom: el("llm-base-url-custom"),
   modelSelect: el("model-select"),
   modelInput: el("model-input"),
   pullModelName: el("pull-model-name"),
@@ -39,6 +40,7 @@ const fields = {
 };
 let availableRagCollections = [];
 let availableModels = [];
+let rememberedLlmBaseUrls = [];
 let selectedFeedbackRating = null;
 let lastResponseForFeedback = null;
 const PERFORMANCE_HISTORY_LIMIT = 20;
@@ -87,6 +89,51 @@ function showFeedbackStatus(msg) {
   if (fields.feedbackStatus) {
     fields.feedbackStatus.textContent = msg;
   }
+}
+
+function getEffectiveLlmBaseUrl() {
+  const custom = fields.llmBaseUrlCustom ? fields.llmBaseUrlCustom.value.trim() : "";
+  if (custom) {
+    return custom;
+  }
+  return fields.llmBaseUrl ? fields.llmBaseUrl.value.trim() : "";
+}
+
+function populateLlmBaseUrlSelect(selectedUrl) {
+  if (!fields.llmBaseUrl) {
+    return;
+  }
+  const chosen = (selectedUrl || "").trim();
+  const merged = [...rememberedLlmBaseUrls];
+  if (chosen && !merged.includes(chosen)) {
+    merged.push(chosen);
+  }
+  merged.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  rememberedLlmBaseUrls = merged;
+
+  fields.llmBaseUrl.innerHTML = "";
+  rememberedLlmBaseUrls.forEach((url) => {
+    const option = document.createElement("option");
+    option.value = url;
+    option.textContent = url;
+    fields.llmBaseUrl.appendChild(option);
+  });
+
+  if (chosen && rememberedLlmBaseUrls.includes(chosen)) {
+    fields.llmBaseUrl.value = chosen;
+  } else if (rememberedLlmBaseUrls.length > 0) {
+    fields.llmBaseUrl.value = rememberedLlmBaseUrls[0];
+  }
+}
+
+async function loadLlmBaseUrls(selectedUrl) {
+  const response = await fetch("/api/llm-base-urls?limit=500");
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  const data = await response.json();
+  rememberedLlmBaseUrls = Array.isArray(data.urls) ? data.urls : [];
+  populateLlmBaseUrlSelect(selectedUrl || getEffectiveLlmBaseUrl());
 }
 
 function initHelpTips() {
@@ -171,7 +218,7 @@ async function copyDiagnostics() {
     copied_at: isoNow(),
     ui_settings: {
       provider: fields.provider.value,
-      llm_base_url: fields.llmBaseUrl.value.trim(),
+      llm_base_url: getEffectiveLlmBaseUrl(),
       model: getCurrentModel(),
       use_rag: fields.useRag.checked,
       enabled_rag_collections: enabledRagCollections,
@@ -321,7 +368,7 @@ function currentSettingsPayload() {
   renderDiagnostics();
   return {
     provider: fields.provider.value,
-    llm_base_url: fields.llmBaseUrl.value.trim(),
+    llm_base_url: getEffectiveLlmBaseUrl(),
     model: getCurrentModel(),
     system_prompt: fields.systemPrompt.value,
     enabled_rag_collections: enabledRagCollections,
@@ -398,7 +445,7 @@ async function loadAvailableModels() {
   if (fields.provider.value !== "ollama") {
     return;
   }
-  const baseUrl = encodeURIComponent(fields.llmBaseUrl.value.trim());
+  const baseUrl = encodeURIComponent(getEffectiveLlmBaseUrl());
   const response = await fetch(`/api/models?provider=ollama&base_url=${baseUrl}`);
   if (!response.ok) {
     throw new Error(await response.text());
@@ -430,7 +477,10 @@ function applySettings(settings) {
     return;
   }
   fields.provider.value = settings.provider;
-  fields.llmBaseUrl.value = settings.llm_base_url;
+  populateLlmBaseUrlSelect(settings.llm_base_url);
+  if (fields.llmBaseUrlCustom) {
+    fields.llmBaseUrlCustom.value = "";
+  }
   fields.modelInput.value = settings.model;
   fields.systemPrompt.value = settings.system_prompt;
   fields.temperature.value = settings.tweaks.temperature;
@@ -458,6 +508,11 @@ async function loadSettings() {
   const response = await fetch("/api/settings");
   const data = await response.json();
   applySettings(data);
+  try {
+    await loadLlmBaseUrls(data.llm_base_url);
+  } catch (err) {
+    showStatus(`LLM URL list unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
   if (fields.provider.value === "ollama") {
     try {
       await loadAvailableModels();
@@ -486,7 +541,7 @@ async function pullModel() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       provider: "ollama",
-      base_url: fields.llmBaseUrl.value.trim(),
+      base_url: getEffectiveLlmBaseUrl(),
       name,
     }),
   });
@@ -494,6 +549,7 @@ async function pullModel() {
     throw new Error(await response.text());
   }
   const data = await response.json();
+  await loadLlmBaseUrls(getEffectiveLlmBaseUrl());
   await loadAvailableModels();
   populateModelSelect(data.pulled_model);
   fields.pullModelName.value = "";
@@ -927,6 +983,40 @@ if (fields.provider) {
     }
   });
 }
+if (fields.llmBaseUrl) {
+  fields.llmBaseUrl.addEventListener("change", async () => {
+    if (fields.llmBaseUrlCustom) {
+      fields.llmBaseUrlCustom.value = "";
+    }
+    if (fields.provider && fields.provider.value === "ollama") {
+      try {
+        await loadAvailableModels();
+      } catch (err) {
+        showStatus(`Model list unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  });
+}
+if (fields.llmBaseUrlCustom) {
+  fields.llmBaseUrlCustom.addEventListener("keydown", async (event) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    const customUrl = fields.llmBaseUrlCustom.value.trim();
+    if (!customUrl) {
+      return;
+    }
+    populateLlmBaseUrlSelect(customUrl);
+    if (fields.provider && fields.provider.value === "ollama") {
+      try {
+        await loadAvailableModels();
+      } catch (err) {
+        showStatus(`Model list unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  });
+}
 if (fields.modelSelect) {
   fields.modelSelect.addEventListener("change", () => {
     updateModelControls();
@@ -1036,6 +1126,11 @@ async function bootstrap() {
   renderPerformanceChart();
   await loadMeta();
   await checkHealth();
+  try {
+    await loadLlmBaseUrls();
+  } catch (err) {
+    showStatus(`LLM URL list unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
   await loadRagCollections();
   await loadSettings();
   await loadTopics();

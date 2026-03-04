@@ -23,6 +23,7 @@ from app.models import (
     ChatRequest,
     ChatResponse,
     FeedbackCreateRequest,
+    LlmBaseUrlsResponse,
     MetaResponse,
     ModelPullRequest,
     ModelPullResponse,
@@ -48,6 +49,7 @@ default_settings = AppSettings(
     enabled_rag_collections=config.rag_collections,
 )
 storage = Storage(db_path=config.db_path, default_settings=default_settings)
+storage.remember_llm_base_url(default_settings.llm_base_url)
 topics_service = TopicsService(config.topics_url, config.topics_cache_ttl_seconds)
 rag_service = RagService(
     qdrant_url=config.qdrant_url,
@@ -197,6 +199,7 @@ async def get_meta() -> MetaResponse:
 @app.get("/api/settings", response_model=AppSettings)
 async def get_settings() -> AppSettings:
     settings = storage.get_settings()
+    storage.remember_llm_base_url(settings.llm_base_url)
     if not settings.enabled_rag_collections and config.rag_collections:
         # Backward-compatible default for older stored settings payloads.
         settings.enabled_rag_collections = config.rag_collections
@@ -213,6 +216,7 @@ async def put_settings(update: SettingsUpdate) -> AppSettings:
         if collection in set(config.rag_collections)
     ]
     storage.save_settings(settings)
+    storage.remember_llm_base_url(settings.llm_base_url)
     logger.info(
         "Saved settings provider=%s model=%s enabled_rag_collections=%s",
         settings.provider,
@@ -224,6 +228,12 @@ async def put_settings(update: SettingsUpdate) -> AppSettings:
         ),
     )
     return settings
+
+
+@app.get("/api/llm-base-urls", response_model=LlmBaseUrlsResponse)
+async def get_llm_base_urls(limit: int = Query(default=200, ge=1, le=1000)) -> LlmBaseUrlsResponse:
+    urls = storage.get_llm_base_urls(limit=limit)
+    return LlmBaseUrlsResponse(urls=urls)
 
 
 @app.get("/api/rag/collections", response_model=RagCollectionsResponse)
