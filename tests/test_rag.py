@@ -103,6 +103,15 @@ def test_extract_chunk_text_prefers_chunk_text() -> None:
     assert _extract_chunk_text(payload) == "ebook body"
 
 
+def test_extract_chunk_text_prefers_slack_summary_for_thread_summary() -> None:
+    payload = {
+        "doc_type": "thread_summary",
+        "summary": "Summary of the thread",
+        "text": "Raw thread message",
+    }
+    assert _extract_chunk_text(payload) == "Summary of the thread"
+
+
 def test_embed_query_uses_modern_embed_endpoint_first(monkeypatch) -> None:
     service = _service()
 
@@ -174,6 +183,46 @@ def test_calibre_filter_always_includes_library_summary() -> None:
     match_any = getattr(condition, "match", None)
     values = getattr(match_any, "any", [])
     assert "library_summary" in values
+
+
+def test_slack_filter_targets_channel_and_workspace_for_channel_queries() -> None:
+    service = _service()
+    query_filter = service._build_collection_filter("slack", "what channels should I join")
+    assert query_filter is not None
+    assert query_filter.must
+    condition = query_filter.must[0]
+    assert getattr(condition, "key", "") == "doc_type"
+    match_any = getattr(condition, "match", None)
+    values = getattr(match_any, "any", [])
+    assert "channel_summary" in values
+    assert "workspace_summary" in values
+
+
+def test_slack_filter_returns_none_when_no_intent_words() -> None:
+    service = _service()
+    query_filter = service._build_collection_filter("slack", "compressor maintenance schedule")
+    assert query_filter is None
+
+
+def test_rag_expands_search_limit_when_min_score_enabled() -> None:
+    service = _service()
+    service.top_k = 3
+    service.min_score = 0.1
+    captured: dict[str, int] = {}
+
+    class FakeClient:
+        def query_points(self, *, collection_name, query, query_filter, with_payload, limit):
+            del collection_name, query, query_filter, with_payload
+            captured["limit"] = limit
+            return SimpleNamespace(points=[])
+
+    service._search_collection(
+        client=FakeClient(),
+        collection="wiki",
+        vector=[0.1, 0.2],
+        query_filter=None,
+    )
+    assert captured["limit"] == 6
 
 
 def test_rag_reuses_single_qdrant_client(monkeypatch) -> None:

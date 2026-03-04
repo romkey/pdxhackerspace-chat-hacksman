@@ -43,3 +43,61 @@ def test_build_system_prompt_keeps_default_format_for_non_calibre_chunks() -> No
     )
     assert "collection=wiki score=0.9100" in prompt
     assert "Safety glasses are required." in prompt
+
+
+def test_build_system_prompt_formats_slack_chunk_metadata() -> None:
+    prompt = _build_system_prompt(
+        "Base prompt",
+        [
+            ContextChunk(
+                collection="slack",
+                score=0.88,
+                text="Let's discuss laser cutter maintenance.",
+                metadata={
+                    "channel_name": "tools",
+                    "user_name": "alice",
+                    "datetime": "2026-03-01 10:22",
+                    "doc_type": "thread_summary",
+                    "reply_count": 3,
+                    "reaction_count": 7,
+                    "permalink": "https://slack.example/thread/123",
+                },
+            )
+        ],
+    )
+    assert "#tools" in prompt
+    assert "@alice" in prompt
+    assert "[thread_summary]" in prompt
+    assert "3 replies" in prompt
+    assert "7 reactions" in prompt
+    assert "Link: https://slack.example/thread/123" in prompt
+
+
+def test_build_system_prompt_adds_slack_guidance_when_present() -> None:
+    prompt = _build_system_prompt(
+        "Base prompt",
+        [
+            ContextChunk(
+                collection="slack",
+                score=0.9,
+                text="Compressor discussion",
+                metadata={},
+            )
+        ],
+    )
+    assert "For Slack context: cite channels as #channel-name" in prompt
+
+
+def test_build_system_prompt_does_not_add_slack_guidance_without_slack_chunks() -> None:
+    prompt = _build_system_prompt(
+        "Base prompt",
+        [
+            ContextChunk(
+                collection="wiki",
+                score=0.9,
+                text="General docs",
+                metadata={},
+            )
+        ],
+    )
+    assert "For Slack context: cite channels as #channel-name" not in prompt

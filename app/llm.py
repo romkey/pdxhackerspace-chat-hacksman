@@ -25,11 +25,29 @@ class LlmResult:
     provider_metrics: dict[str, Any]
 
 
-def _format_chunk(idx: int, chunk: ContextChunk) -> str:
-    metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
-    if chunk.collection != "calibre_books":
-        return f"[{idx}] collection={chunk.collection} score={chunk.score:.4f}\n{chunk.text}"
+def _is_slack_collection(collection: str) -> bool:
+    normalized = collection.strip().lower()
+    return normalized == "slack" or normalized.startswith("slack_") or normalized.startswith(
+        "slack-"
+    )
 
+
+def _to_positive_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value if value > 0 else 0
+    if isinstance(value, str):
+        try:
+            parsed = int(value.strip())
+            return parsed if parsed > 0 else 0
+        except ValueError:
+            return 0
+    return 0
+
+
+def _format_calibre_chunk(idx: int, chunk: ContextChunk) -> str:
+    metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
     header_parts: list[str] = []
     title = metadata.get("title")
     if isinstance(title, str) and title.strip():
@@ -61,18 +79,80 @@ def _format_chunk(idx: int, chunk: ContextChunk) -> str:
     return f"[{idx}] {header}\n{chunk.text}"
 
 
+def _format_slack_chunk(idx: int, chunk: ContextChunk) -> str:
+    metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
+    header_parts: list[str] = []
+
+    channel = metadata.get("channel_name") or metadata.get("channel_id")
+    if isinstance(channel, str) and channel.strip():
+        channel_name = channel.strip()
+        if not channel_name.startswith("#"):
+            channel_name = f"#{channel_name}"
+        header_parts.append(channel_name)
+
+    user = metadata.get("user_name") or metadata.get("user_id")
+    if isinstance(user, str) and user.strip():
+        user_name = user.strip()
+        if not user_name.startswith("@"):
+            user_name = f"@{user_name}"
+        header_parts.append(user_name)
+
+    dt = metadata.get("datetime") or metadata.get("date") or metadata.get("ts")
+    if isinstance(dt, str) and dt.strip():
+        header_parts.append(dt.strip())
+
+    doc_type = metadata.get("doc_type")
+    if isinstance(doc_type, str) and doc_type.strip() and doc_type.strip() != "message":
+        header_parts.append(f"[{doc_type.strip()}]")
+
+    reply_count = _to_positive_int(metadata.get("reply_count"))
+    if reply_count:
+        header_parts.append(f"{reply_count} replies")
+
+    reaction_count = _to_positive_int(metadata.get("reaction_count"))
+    if reaction_count:
+        header_parts.append(f"{reaction_count} reactions")
+
+    header = " | ".join(header_parts) if header_parts else f"collection={chunk.collection}"
+    result = f"[{idx}] {header} (score={chunk.score:.4f})\n{chunk.text}"
+
+    permalink = metadata.get("permalink")
+    if isinstance(permalink, str) and permalink.strip():
+        result += f"\nLink: {permalink.strip()}"
+    return result
+
+
+def _format_chunk(idx: int, chunk: ContextChunk) -> str:
+    if chunk.collection == "calibre_books":
+        return _format_calibre_chunk(idx, chunk)
+    if _is_slack_collection(chunk.collection):
+        return _format_slack_chunk(idx, chunk)
+    return f"[{idx}] collection={chunk.collection} score={chunk.score:.4f}\n{chunk.text}"
+
+
 def _build_system_prompt(base_prompt: str, context: list[ContextChunk]) -> str:
     if not context:
         return base_prompt
 
+    has_slack = any(_is_slack_collection(chunk.collection) for chunk in context)
     context_parts = []
     for idx, chunk in enumerate(context, start=1):
         context_parts.append(_format_chunk(idx, chunk))
     context_block = "\n\n".join(context_parts)
+    guidance = (
+        "Use the retrieved context when it is relevant. If it conflicts with known facts, "
+        "say what is uncertain."
+    )
+    if has_slack:
+        guidance += (
+            "\n\nFor Slack context: cite channels as #channel-name and users as @username. "
+            "When recommending channels, prefer those with higher activity and reaction counts. "
+            "Include permalinks when available so members can read the full thread. "
+            "Messages with many reactions were found valuable by the community."
+        )
     return (
         f"{base_prompt}\n\n"
-        "Use the retrieved context when it is relevant. If it conflicts with known facts, "
-        "say what is uncertain.\n\n"
+        f"{guidance}\n\n"
         f"Retrieved context:\n{context_block}"
     )
 

@@ -14,7 +14,63 @@ from app.models import ContextChunk
 logger = logging.getLogger(__name__)
 
 
+def _is_slack_collection(collection: str) -> bool:
+    normalized = collection.strip().lower()
+    return normalized == "slack" or normalized.startswith("slack_") or normalized.startswith(
+        "slack-"
+    )
+
+
+def _is_slack_payload(payload: dict[str, Any]) -> bool:
+    doc_type = payload.get("doc_type")
+    if isinstance(doc_type, str) and doc_type.strip():
+        return True
+    slack_keys = {
+        "channel_name",
+        "channel_id",
+        "user_name",
+        "user_id",
+        "permalink",
+        "thread_ts",
+        "ts",
+    }
+    return any(key in payload for key in slack_keys)
+
+
+def _extract_slack_chunk_text(payload: dict[str, Any]) -> str:
+    doc_type = payload.get("doc_type")
+    normalized_doc_type = doc_type.strip().lower() if isinstance(doc_type, str) else ""
+    preferred_keys: tuple[str, ...]
+    if normalized_doc_type == "thread_summary":
+        preferred_keys = ("thread_summary", "summary", "thread_text", "text")
+    elif normalized_doc_type == "channel_summary":
+        preferred_keys = ("channel_summary", "summary", "channel_text", "text")
+    elif normalized_doc_type in {"user_summary", "team_summary", "workspace_summary"}:
+        preferred_keys = ("summary", "profile", "description", "text")
+    elif normalized_doc_type == "message":
+        preferred_keys = ("text", "message_text", "body", "content")
+    else:
+        preferred_keys = ("summary", "text", "content", "body")
+
+    for key in preferred_keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    message_obj = payload.get("message")
+    if isinstance(message_obj, dict):
+        message_text = message_obj.get("text")
+        if isinstance(message_text, str) and message_text.strip():
+            return message_text.strip()
+
+    return ""
+
+
 def _extract_chunk_text(payload: dict[str, Any]) -> str:
+    if _is_slack_payload(payload):
+        slack_text = _extract_slack_chunk_text(payload)
+        if slack_text:
+            return slack_text
     for key in ("chunk_text", "text", "content", "chunk", "document", "body"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
@@ -105,6 +161,7 @@ class RagService:
         vector: list[float],
         query_filter: Filter | None = None,
     ) -> list[Any]:
+        search_limit = self.top_k * 2 if self.min_score > 0 else self.top_k
         if hasattr(client, "search"):
             try:
                 hits = client.search(
@@ -112,7 +169,7 @@ class RagService:
                     query_vector=vector,
                     query_filter=query_filter,
                     with_payload=True,
-                    limit=self.top_k,
+                    limit=search_limit,
                 )
             except TypeError:
                 try:
@@ -121,14 +178,14 @@ class RagService:
                         query_vector=vector,
                         filter=query_filter,
                         with_payload=True,
-                        limit=self.top_k,
+                        limit=search_limit,
                     )
                 except TypeError:
                     hits = client.search(
                         collection_name=collection,
                         query_vector=vector,
                         with_payload=True,
-                        limit=self.top_k,
+                        limit=search_limit,
                     )
             return list(hits)
 
@@ -139,7 +196,7 @@ class RagService:
                     query=vector,
                     query_filter=query_filter,
                     with_payload=True,
-                    limit=self.top_k,
+                    limit=search_limit,
                 )
             except TypeError:
                 try:
@@ -148,14 +205,14 @@ class RagService:
                         query=vector,
                         filter=query_filter,
                         with_payload=True,
-                        limit=self.top_k,
+                        limit=search_limit,
                     )
                 except TypeError:
                     response = client.query_points(
                         collection_name=collection,
                         query=vector,
                         with_payload=True,
-                        limit=self.top_k,
+                        limit=search_limit,
                     )
             points = getattr(response, "points", response)
             return list(points) if points is not None else []
@@ -176,18 +233,43 @@ class RagService:
             return ["content", "description", "library_summary"]
         return ["content", "description", "book_metadata", "library_summary"]
 
+    def _slack_doc_types_for_query(self, query: str) -> list[str] | None:
+        tokens = set(query.strip().lower().split())
+        channel_words = {"channel", "channels", "join", "where", "post", "discuss", "room"}
+        people_words = {"who", "person", "member", "members", "team", "contact", "expert"}
+        thread_words = {"decided", "decision", "discussed", "outcome", "resolved", "thread"}
+
+        if tokens & channel_words:
+            return ["channel_summary", "workspace_summary"]
+        if tokens & people_words:
+            return ["user_summary", "team_summary", "message"]
+        if tokens & thread_words:
+            return ["thread_summary", "message"]
+        return None
+
     def _build_collection_filter(self, collection: str, query: str) -> Filter | None:
-        if collection != "calibre_books":
-            return None
-        chunk_types = self._calibre_chunk_types_for_query(query)
-        return Filter(
-            must=[
-                FieldCondition(
-                    key="chunk_type",
-                    match=MatchAny(any=chunk_types),
+        if collection == "calibre_books":
+            chunk_types = self._calibre_chunk_types_for_query(query)
+            return Filter(
+                must=[
+                    FieldCondition(
+                        key="chunk_type",
+                        match=MatchAny(any=chunk_types),
+                    )
+                ]
+            )
+        if _is_slack_collection(collection):
+            doc_types = self._slack_doc_types_for_query(query)
+            if doc_types:
+                return Filter(
+                    must=[
+                        FieldCondition(
+                            key="doc_type",
+                            match=MatchAny(any=doc_types),
+                        )
+                    ]
                 )
-            ]
-        )
+        return None
 
     def _extract_vector_dim(self, collection_info: Any) -> int | None:
         config = getattr(collection_info, "config", None)
