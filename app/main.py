@@ -4,11 +4,14 @@ import base64
 import binascii
 import logging
 import secrets
+import socket
 import tomllib
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
 from time import perf_counter
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -24,6 +27,8 @@ from app.models import (
     ChatResponse,
     FeedbackCreateRequest,
     LlmBaseUrlsResponse,
+    LlmBaseUrlStatusesResponse,
+    LlmBaseUrlStatusRecord,
     MetaResponse,
     ModelPullRequest,
     ModelPullResponse,
@@ -127,6 +132,27 @@ def _client_ip_from_request(request: Request) -> str:
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
+
+
+def _resolve_provider_ip(base_url: str) -> str:
+    try:
+        parsed = urlparse(base_url)
+        hostname = parsed.hostname or ""
+        if not hostname:
+            return "unknown"
+        return socket.gethostbyname(hostname)
+    except Exception:
+        return "unknown"
+
+
+async def _check_provider_availability(base_url: str) -> bool:
+    url = base_url.rstrip("/") + "/"
+    try:
+        async with httpx.AsyncClient(timeout=3.0, follow_redirects=True) as client:
+            await client.get(url)
+            return True
+    except Exception:
+        return False
 
 
 def _basic_auth_valid(authorization_header: str | None) -> bool:
@@ -234,6 +260,48 @@ async def put_settings(update: SettingsUpdate) -> AppSettings:
 async def get_llm_base_urls(limit: int = Query(default=200, ge=1, le=1000)) -> LlmBaseUrlsResponse:
     urls = storage.get_llm_base_urls(limit=limit)
     return LlmBaseUrlsResponse(urls=urls)
+
+
+@app.get("/api/llm-base-urls/status", response_model=LlmBaseUrlStatusesResponse)
+async def get_llm_base_url_statuses(
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> LlmBaseUrlStatusesResponse:
+    urls = storage.get_llm_base_urls(limit=limit)
+    now = datetime.now(UTC)
+    items: list[LlmBaseUrlStatusRecord] = []
+    for url in urls:
+        available = await _check_provider_availability(url)
+        previous = storage.get_llm_base_url_status(url)
+        if previous is None:
+            last_changed_at = now
+        else:
+            previous_available, previous_changed_at, _previous_checked_at = previous
+            if previous_available != available:
+                last_changed_at = now
+                logger.info(
+                    "Provider availability changed url=%s ip=%s available=%s previous=%s",
+                    url,
+                    _resolve_provider_ip(url),
+                    available,
+                    previous_available,
+                )
+            else:
+                last_changed_at = previous_changed_at
+        storage.upsert_llm_base_url_status(
+            llm_base_url=url,
+            is_available=available,
+            last_changed_at=last_changed_at,
+            last_checked_at=now,
+        )
+        items.append(
+            LlmBaseUrlStatusRecord(
+                url=url,
+                available=available,
+                last_changed_at=last_changed_at,
+                last_checked_at=now,
+            )
+        )
+    return LlmBaseUrlStatusesResponse(items=items)
 
 
 @app.get("/api/rag/collections", response_model=RagCollectionsResponse)

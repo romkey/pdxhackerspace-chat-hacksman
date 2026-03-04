@@ -50,6 +50,17 @@ class LlmBaseUrlsResponse(BaseModel):
     urls: list[str]
 
 
+class LlmBaseUrlStatusRecord(BaseModel):
+    url: str
+    available: bool
+    last_changed_at: datetime
+    last_checked_at: datetime
+
+
+class LlmBaseUrlStatusesResponse(BaseModel):
+    items: list[LlmBaseUrlStatusRecord]
+
+
 class ModelPullRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     provider: ProviderName | None = None

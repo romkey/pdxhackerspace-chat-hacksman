@@ -80,6 +80,71 @@ def test_llm_base_url_history_is_remembered_and_sorted() -> None:
         assert urls == sorted(urls, key=lambda item: item.casefold())
 
 
+def test_llm_base_url_status_reports_transition_times(monkeypatch) -> None:
+    outcomes = {
+        "http://alpha.local:11434": [True, False],
+        "http://zeta.local:11434": [True, True],
+    }
+
+    async def fake_check(url: str) -> bool:
+        values = outcomes[url]
+        return values.pop(0) if values else True
+
+    monkeypatch.setattr(main_module, "_check_provider_availability", fake_check)
+
+    with TestClient(app) as client:
+        assert client.put(
+            "/api/settings",
+            json={
+                "provider": "ollama",
+                "llm_base_url": "http://zeta.local:11434",
+                "model": "llama3.2:latest",
+                "system_prompt": "Prompt A",
+                "tweaks": {
+                    "max_tokens": 512,
+                    "temperature": 0.1,
+                    "top_p": 0.9,
+                    "num_ctx": 4096,
+                    "repeat_penalty": 1.1,
+                    "seed": None,
+                },
+            },
+        ).status_code == 200
+        assert client.put(
+            "/api/settings",
+            json={
+                "provider": "ollama",
+                "llm_base_url": "http://alpha.local:11434",
+                "model": "llama3.2:latest",
+                "system_prompt": "Prompt B",
+                "tweaks": {
+                    "max_tokens": 512,
+                    "temperature": 0.1,
+                    "top_p": 0.9,
+                    "num_ctx": 4096,
+                    "repeat_penalty": 1.1,
+                    "seed": None,
+                },
+            },
+        ).status_code == 200
+
+        first = client.get("/api/llm-base-urls/status?limit=100")
+        assert first.status_code == 200
+        first_items = {item["url"]: item for item in first.json()["items"]}
+        assert first_items["http://alpha.local:11434"]["available"] is True
+        assert first_items["http://zeta.local:11434"]["available"] is True
+        alpha_changed_first = first_items["http://alpha.local:11434"]["last_changed_at"]
+
+        second = client.get("/api/llm-base-urls/status?limit=100")
+        assert second.status_code == 200
+        second_items = {item["url"]: item for item in second.json()["items"]}
+        assert second_items["http://alpha.local:11434"]["available"] is False
+        assert (
+            second_items["http://alpha.local:11434"]["last_changed_at"] != alpha_changed_first
+        )
+        assert second_items["http://zeta.local:11434"]["available"] is True
+
+
 def test_chat_endpoint_records_history(monkeypatch) -> None:
     async def fake_retrieve(self, _: str, enabled_collections=None):  # noqa: ANN001
         del self

@@ -119,6 +119,16 @@ class Storage:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS llm_base_url_status (
+                    url TEXT PRIMARY KEY,
+                    is_available INTEGER NOT NULL,
+                    last_changed_at TEXT NOT NULL,
+                    last_checked_at TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
 
     def get_settings(self) -> AppSettings:
@@ -178,6 +188,64 @@ class Storage:
                 (safe_limit,),
             ).fetchall()
         return [str(row["url"]) for row in rows]
+
+    def get_llm_base_url_status(
+        self, llm_base_url: str
+    ) -> tuple[bool, datetime, datetime] | None:
+        normalized = llm_base_url.strip()
+        if not normalized:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT is_available, last_changed_at, last_checked_at
+                FROM llm_base_url_status
+                WHERE url = ?
+                """,
+                (normalized,),
+            ).fetchone()
+        if not row:
+            return None
+        return (
+            bool(row["is_available"]),
+            datetime.fromisoformat(row["last_changed_at"]),
+            datetime.fromisoformat(row["last_checked_at"]),
+        )
+
+    def upsert_llm_base_url_status(
+        self,
+        *,
+        llm_base_url: str,
+        is_available: bool,
+        last_changed_at: datetime,
+        last_checked_at: datetime,
+    ) -> None:
+        normalized = llm_base_url.strip()
+        if not normalized:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO llm_base_url_status (
+                    url,
+                    is_available,
+                    last_changed_at,
+                    last_checked_at
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    is_available = excluded.is_available,
+                    last_changed_at = excluded.last_changed_at,
+                    last_checked_at = excluded.last_checked_at
+                """,
+                (
+                    normalized,
+                    int(is_available),
+                    last_changed_at.isoformat(),
+                    last_checked_at.isoformat(),
+                ),
+            )
+            conn.commit()
 
     def append_history(
         self,

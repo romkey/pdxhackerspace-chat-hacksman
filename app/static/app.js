@@ -99,40 +99,82 @@ function getEffectiveLlmBaseUrl() {
   return fields.llmBaseUrl ? fields.llmBaseUrl.value.trim() : "";
 }
 
+function formatRelativeTime(isoTime) {
+  const timestamp = Date.parse(isoTime || "");
+  if (Number.isNaN(timestamp)) {
+    return "unknown";
+  }
+  const diffMs = Math.max(0, Date.now() - timestamp);
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 60) {
+    return `${seconds} second${seconds === 1 ? "" : "s"} ago`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  }
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
 function populateLlmBaseUrlSelect(selectedUrl) {
   if (!fields.llmBaseUrl) {
     return;
   }
   const chosen = (selectedUrl || "").trim();
-  const merged = [...rememberedLlmBaseUrls];
-  if (chosen && !merged.includes(chosen)) {
-    merged.push(chosen);
+  const map = new Map();
+  rememberedLlmBaseUrls.forEach((item) => {
+    if (!item || !item.url) {
+      return;
+    }
+    map.set(item.url, item);
+  });
+  if (chosen && !map.has(chosen)) {
+    map.set(chosen, {
+      url: chosen,
+      available: null,
+      last_changed_at: null,
+      last_checked_at: null,
+    });
   }
-  merged.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
-  rememberedLlmBaseUrls = merged;
+  rememberedLlmBaseUrls = Array.from(map.values()).sort((a, b) =>
+    a.url.localeCompare(b.url, undefined, { sensitivity: "base" })
+  );
 
   fields.llmBaseUrl.innerHTML = "";
-  rememberedLlmBaseUrls.forEach((url) => {
+  rememberedLlmBaseUrls.forEach((item) => {
     const option = document.createElement("option");
-    option.value = url;
-    option.textContent = url;
+    option.value = item.url;
+    const statusLabel =
+      item.available === true ? "up" : item.available === false ? "down" : "unknown";
+    const relative = item.last_changed_at ? formatRelativeTime(item.last_changed_at) : "unknown";
+    option.textContent = `${item.url} (${statusLabel}, changed ${relative})`;
+    if (item.last_changed_at) {
+      option.title = `Last changed: ${new Date(item.last_changed_at).toLocaleString()}`;
+    } else {
+      option.title = "Last changed: unknown";
+    }
     fields.llmBaseUrl.appendChild(option);
   });
 
-  if (chosen && rememberedLlmBaseUrls.includes(chosen)) {
+  if (chosen && rememberedLlmBaseUrls.some((item) => item.url === chosen)) {
     fields.llmBaseUrl.value = chosen;
   } else if (rememberedLlmBaseUrls.length > 0) {
-    fields.llmBaseUrl.value = rememberedLlmBaseUrls[0];
+    fields.llmBaseUrl.value = rememberedLlmBaseUrls[0].url;
   }
 }
 
 async function loadLlmBaseUrls(selectedUrl) {
-  const response = await fetch("/api/llm-base-urls?limit=500");
+  const response = await fetch("/api/llm-base-urls/status?limit=500");
   if (!response.ok) {
     throw new Error(await response.text());
   }
   const data = await response.json();
-  rememberedLlmBaseUrls = Array.isArray(data.urls) ? data.urls : [];
+  rememberedLlmBaseUrls = Array.isArray(data.items) ? data.items : [];
   populateLlmBaseUrlSelect(selectedUrl || getEffectiveLlmBaseUrl());
 }
 
