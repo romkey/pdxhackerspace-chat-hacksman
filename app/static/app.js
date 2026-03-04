@@ -40,8 +40,6 @@ const fields = {
   numCtxField: el("num-ctx-field"),
   seedField: el("seed-field"),
 };
-const tabButtons = Array.from(document.querySelectorAll("[data-tab-target]"));
-const tabPanels = Array.from(document.querySelectorAll("[data-tab-panel]"));
 let availableRagCollections = [];
 let availableModels = [];
 let rememberedLlmBaseUrls = [];
@@ -113,6 +111,8 @@ function pulseResponsePanel() {
 }
 
 function setActiveTab(tabId) {
+  const tabButtons = Array.from(document.querySelectorAll("[data-tab-target]"));
+  const tabPanels = Array.from(document.querySelectorAll("[data-tab-panel]"));
   tabButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.tabTarget === tabId);
   });
@@ -1197,16 +1197,20 @@ function bindClick(id, handler) {
   node.addEventListener("click", handler);
 }
 
-tabButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    const target = button.dataset.tabTarget;
-    if (target) {
-      setActiveTab(target);
-    }
+function bindTabNavigation() {
+  const tabButtons = Array.from(document.querySelectorAll("[data-tab-target]"));
+  tabButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const target = button.dataset.tabTarget;
+      if (target) {
+        setActiveTab(target);
+      }
+    });
   });
-});
+}
 
 async function bootstrap() {
+  bindTabNavigation();
   setActiveTab("chat");
   initHelpTips();
   renderDiagnostics();
