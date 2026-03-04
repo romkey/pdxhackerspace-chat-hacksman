@@ -19,6 +19,8 @@ const fields = {
   status: el("status"),
   question: el("question"),
   response: el("response"),
+  responsePanel: el("response-panel"),
+  responseLoading: el("response-loading"),
   metrics: el("metrics"),
   performanceChart: el("performance-chart"),
   history: el("history"),
@@ -38,6 +40,8 @@ const fields = {
   numCtxField: el("num-ctx-field"),
   seedField: el("seed-field"),
 };
+const tabButtons = Array.from(document.querySelectorAll("[data-tab-target]"));
+const tabPanels = Array.from(document.querySelectorAll("[data-tab-panel]"));
 let availableRagCollections = [];
 let availableModels = [];
 let rememberedLlmBaseUrls = [];
@@ -89,6 +93,32 @@ function showFeedbackStatus(msg) {
   if (fields.feedbackStatus) {
     fields.feedbackStatus.textContent = msg;
   }
+}
+
+function setResponseLoading(isLoading) {
+  if (!fields.responseLoading) {
+    return;
+  }
+  fields.responseLoading.hidden = !isLoading;
+}
+
+function pulseResponsePanel() {
+  if (!fields.responsePanel) {
+    return;
+  }
+  fields.responsePanel.classList.remove("fresh-response");
+  // Restart CSS animation for each new response.
+  void fields.responsePanel.offsetWidth;
+  fields.responsePanel.classList.add("fresh-response");
+}
+
+function setActiveTab(tabId) {
+  tabButtons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.tabTarget === tabId);
+  });
+  tabPanels.forEach((panel) => {
+    panel.hidden = panel.dataset.tabPanel !== tabId;
+  });
 }
 
 function getEffectiveLlmBaseUrl() {
@@ -859,81 +889,87 @@ async function askQuestion() {
   }
   showStatus("Saving settings and contacting model...");
   fields.response.textContent = "";
-  await saveSettings();
+  setResponseLoading(true);
+  try {
+    await saveSettings();
 
-  const response = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question,
+        use_rag: fields.useRag.checked,
+        temporary_chat: fields.temporaryChat.checked,
+      }),
+    });
+    if (!response.ok) {
+      const errBody = await response.text();
+      fields.response.textContent = `Request failed: ${errBody}`;
+      diagnosticsState.rag.lastError = errBody;
+      diagnosticsState.rag.lastAskedAt = isoNow();
+      diagnosticsState.performance = {
+        totalLatencyMs: null,
+        ragLatencyMs: null,
+        llmLatencyMs: null,
+        promptTokens: null,
+        completionTokens: null,
+        totalTokens: null,
+        tokensPerSecond: null,
+      };
+      renderDiagnostics();
+      renderMetrics();
+      showStatus("Chat request failed.");
+      lastResponseForFeedback = null;
+      showFeedbackStatus("");
+      return;
+    }
+    const data = await response.json();
+    fields.response.textContent = data.answer;
+    pulseResponsePanel();
+    lastResponseForFeedback = {
       question,
-      use_rag: fields.useRag.checked,
-      temporary_chat: fields.temporaryChat.checked,
-    }),
-  });
-  if (!response.ok) {
-    const errBody = await response.text();
-    fields.response.textContent = `Request failed: ${errBody}`;
-    diagnosticsState.rag.lastError = errBody;
-    diagnosticsState.rag.lastAskedAt = isoNow();
-    diagnosticsState.performance = {
-      totalLatencyMs: null,
-      ragLatencyMs: null,
-      llmLatencyMs: null,
-      promptTokens: null,
-      completionTokens: null,
-      totalTokens: null,
-      tokensPerSecond: null,
+      answer: data.answer,
+      historyId: data.history_id ?? null,
+      provider: fields.provider ? fields.provider.value : "",
+      model: getCurrentModel(),
     };
+    selectedFeedbackRating = null;
+    updateFeedbackButtons();
+    showFeedbackStatus("");
+    diagnosticsState.rag.lastContextChunks = (data.context || []).length;
+    diagnosticsState.rag.lastContextCollections = Array.from(
+      new Set((data.context || []).map((chunk) => chunk.collection))
+    );
+    diagnosticsState.rag.lastError = null;
+    diagnosticsState.rag.lastAskedAt = isoNow();
+    diagnosticsState.rag.temporaryChat = fields.temporaryChat.checked;
+    diagnosticsState.performance = {
+      totalLatencyMs: data.metrics?.total_latency_ms ?? null,
+      ragLatencyMs: data.metrics?.rag_latency_ms ?? null,
+      llmLatencyMs: data.metrics?.llm_latency_ms ?? null,
+      promptTokens: data.metrics?.prompt_tokens ?? null,
+      completionTokens: data.metrics?.completion_tokens ?? null,
+      totalTokens: data.metrics?.total_tokens ?? null,
+      tokensPerSecond: data.metrics?.tokens_per_second ?? null,
+    };
+    diagnosticsState.performanceHistory.push({
+      totalLatencyMs: diagnosticsState.performance.totalLatencyMs,
+      tokensPerSecond: diagnosticsState.performance.tokensPerSecond,
+    });
+    if (diagnosticsState.performanceHistory.length > PERFORMANCE_HISTORY_LIMIT) {
+      diagnosticsState.performanceHistory = diagnosticsState.performanceHistory.slice(-PERFORMANCE_HISTORY_LIMIT);
+    }
     renderDiagnostics();
     renderMetrics();
-    showStatus("Chat request failed.");
-    lastResponseForFeedback = null;
-    showFeedbackStatus("");
-    return;
+    renderPerformanceChart();
+    showStatus(
+      `Done. Context chunks used: ${data.context.length}. Latency: ${data.metrics?.total_latency_ms ?? "n/a"} ms${fields.temporaryChat.checked ? " (temporary, not saved)" : ""}`
+    );
+    await loadHistory();
+    await loadFeedback();
+  } finally {
+    setResponseLoading(false);
   }
-  const data = await response.json();
-  fields.response.textContent = data.answer;
-  lastResponseForFeedback = {
-    question,
-    answer: data.answer,
-    historyId: data.history_id ?? null,
-    provider: fields.provider ? fields.provider.value : "",
-    model: getCurrentModel(),
-  };
-  selectedFeedbackRating = null;
-  updateFeedbackButtons();
-  showFeedbackStatus("");
-  diagnosticsState.rag.lastContextChunks = (data.context || []).length;
-  diagnosticsState.rag.lastContextCollections = Array.from(
-    new Set((data.context || []).map((chunk) => chunk.collection))
-  );
-  diagnosticsState.rag.lastError = null;
-  diagnosticsState.rag.lastAskedAt = isoNow();
-  diagnosticsState.rag.temporaryChat = fields.temporaryChat.checked;
-  diagnosticsState.performance = {
-    totalLatencyMs: data.metrics?.total_latency_ms ?? null,
-    ragLatencyMs: data.metrics?.rag_latency_ms ?? null,
-    llmLatencyMs: data.metrics?.llm_latency_ms ?? null,
-    promptTokens: data.metrics?.prompt_tokens ?? null,
-    completionTokens: data.metrics?.completion_tokens ?? null,
-    totalTokens: data.metrics?.total_tokens ?? null,
-    tokensPerSecond: data.metrics?.tokens_per_second ?? null,
-  };
-  diagnosticsState.performanceHistory.push({
-    totalLatencyMs: diagnosticsState.performance.totalLatencyMs,
-    tokensPerSecond: diagnosticsState.performance.tokensPerSecond,
-  });
-  if (diagnosticsState.performanceHistory.length > PERFORMANCE_HISTORY_LIMIT) {
-    diagnosticsState.performanceHistory = diagnosticsState.performanceHistory.slice(-PERFORMANCE_HISTORY_LIMIT);
-  }
-  renderDiagnostics();
-  renderMetrics();
-  renderPerformanceChart();
-  showStatus(
-    `Done. Context chunks used: ${data.context.length}. Latency: ${data.metrics?.total_latency_ms ?? "n/a"} ms${fields.temporaryChat.checked ? " (temporary, not saved)" : ""}`
-  );
-  await loadHistory();
-  await loadFeedback();
 }
 
 bindClick("save-settings", async () => {
@@ -1161,7 +1197,17 @@ function bindClick(id, handler) {
   node.addEventListener("click", handler);
 }
 
+tabButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    const target = button.dataset.tabTarget;
+    if (target) {
+      setActiveTab(target);
+    }
+  });
+});
+
 async function bootstrap() {
+  setActiveTab("chat");
   initHelpTips();
   renderDiagnostics();
   renderMetrics();

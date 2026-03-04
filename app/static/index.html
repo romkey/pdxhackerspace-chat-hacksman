@@ -46,6 +46,83 @@
       #response, #history, #diagnostics, #metrics { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
       #performance-chart { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; color: #d1d5db; }
       .history-item { border: 1px solid #374151; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.75rem; background: #111827; }
+      .response-panel {
+        border: 1px solid #3b82f6;
+        border-radius: 10px;
+        background: linear-gradient(180deg, rgba(30, 58, 138, 0.35) 0%, rgba(17, 24, 39, 0.95) 100%);
+        box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.35), 0 10px 22px rgba(2, 6, 23, 0.4);
+        padding: 0.8rem;
+        margin-bottom: 0.6rem;
+      }
+      .response-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 0.45rem;
+      }
+      .response-title {
+        font-size: 0.8rem;
+        color: #bfdbfe;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        font-weight: 700;
+      }
+      .response-loading {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        font-size: 0.78rem;
+        color: #93c5fd;
+      }
+      .spinner {
+        width: 0.95rem;
+        height: 0.95rem;
+        border: 2px solid rgba(147, 197, 253, 0.35);
+        border-top-color: #60a5fa;
+        border-radius: 9999px;
+        animation: spin 0.75s linear infinite;
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+      #response {
+        min-height: 3.5rem;
+        border: 1px solid #1e3a8a;
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.6);
+        padding: 0.75rem;
+      }
+      .response-panel.fresh-response {
+        animation: responsePulse 1.6s ease-out;
+      }
+      @keyframes responsePulse {
+        0% {
+          box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.35), 0 10px 22px rgba(2, 6, 23, 0.4);
+        }
+        25% {
+          box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.8), 0 0 26px rgba(59, 130, 246, 0.65);
+        }
+        100% {
+          box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.35), 0 10px 22px rgba(2, 6, 23, 0.4);
+        }
+      }
+      .tab-row {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 0.8rem;
+      }
+      .top-tab {
+        background: #1f2937;
+        border-color: #4b5563;
+        color: #d1d5db;
+        font-weight: 600;
+      }
+      .top-tab.active {
+        background: #1d4ed8;
+        border-color: #1d4ed8;
+        color: #eff6ff;
+      }
+      .tab-panel[hidden] { display: none !important; }
       .feedback-row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.5rem; }
       .feedback-row button { min-width: 2.25rem; }
       .feedback-row button.secondary { background: #374151; border-color: #4b5563; }
@@ -162,63 +239,86 @@
       </section>
 
       <section class="card">
-        <h3>Interest & Training Topic Buttons</h3>
-        <div id="topic-buttons"></div>
-        <hr />
-        <div class="field">
-          <label for="question" class="label-with-help">
-            Question
-            <button class="help-tip" data-help="Your prompt to the assistant. Topic buttons fill and send this field." type="button">?</button>
-          </label>
-          <textarea id="question"></textarea>
+        <div class="tab-row">
+          <button class="top-tab active" type="button" data-tab-target="chat">Chat</button>
+          <button class="top-tab" type="button" data-tab-target="feedback">Feedback</button>
+          <button class="top-tab" type="button" data-tab-target="history">History</button>
         </div>
-        <div class="row">
-          <button id="ask">Ask</button>
-          <label class="muted label-with-help">
-            <input id="use-rag" type="checkbox" checked /> Use RAG
-            <button class="help-tip" data-help="When enabled, relevant chunks from selected Qdrant collections are injected into context." type="button">?</button>
-          </label>
+
+        <div class="tab-panel" data-tab-panel="chat">
+          <h3>Interest & Training Topic Buttons</h3>
+          <div id="topic-buttons"></div>
+          <hr />
+          <div class="field">
+            <label for="question" class="label-with-help">
+              Question
+              <button class="help-tip" data-help="Your prompt to the assistant. Topic buttons fill and send this field." type="button">?</button>
+            </label>
+            <textarea id="question"></textarea>
+          </div>
+          <div class="row">
+            <button id="ask">Ask</button>
+            <label class="muted label-with-help">
+              <input id="use-rag" type="checkbox" checked /> Use RAG
+              <button class="help-tip" data-help="When enabled, relevant chunks from selected Qdrant collections are injected into context." type="button">?</button>
+            </label>
+          </div>
+          <h4>Recorded Chats</h4>
+          <p class="muted">Chats are recorded by default and appear in History.</p>
+          <div class="feedback-row">
+            <label class="muted label-with-help">
+              <input id="temporary-chat" type="checkbox" /> Temporary Chat (do not save)
+              <button class="help-tip" data-help="Process this chat normally but do not persist it to history." type="button">?</button>
+            </label>
+          </div>
+          <h4>Response</h4>
+          <div class="response-panel" id="response-panel">
+            <div class="response-header">
+              <span class="response-title">Latest Reply</span>
+              <div id="response-loading" class="response-loading" hidden>
+                <span class="spinner" aria-hidden="true"></span>
+                <span>Generating response...</span>
+              </div>
+            </div>
+            <div id="response"></div>
+          </div>
+          <div class="feedback-row">
+            <button id="feedback-up" class="secondary" type="button" title="Thumbs up">👍</button>
+            <button id="feedback-down" class="secondary" type="button" title="Thumbs down">👎</button>
+            <textarea id="feedback-text" placeholder="Optional feedback text..."></textarea>
+            <button id="submit-feedback" type="button">Save Feedback</button>
+          </div>
+          <p id="feedback-status" class="muted"></p>
+          <div class="button-row">
+            <h4>Performance</h4>
+            <button id="clear-performance-trend" type="button">Clear Trend</button>
+          </div>
+          <div id="metrics"></div>
+          <h4>Performance Trend (last 20 queries)</h4>
+          <div id="performance-chart"></div>
+          <div class="row">
+            <h4>Diagnostics</h4>
+            <button id="copy-diagnostics" type="button">Copy Diagnostics</button>
+          </div>
+          <div id="diagnostics"></div>
         </div>
-        <h4>Recorded Chats</h4>
-        <p class="muted">Chats are recorded by default and appear in History below.</p>
-        <div class="feedback-row">
-          <label class="muted label-with-help">
-            <input id="temporary-chat" type="checkbox" /> Temporary Chat (do not save)
-            <button class="help-tip" data-help="Process this chat normally but do not persist it to history." type="button">?</button>
-          </label>
+
+        <div class="tab-panel" data-tab-panel="feedback" hidden>
+          <div class="button-row">
+            <h4>Feedback</h4>
+            <button id="refresh-feedback" type="button">Refresh Feedback</button>
+          </div>
+          <div id="feedback-list"></div>
         </div>
-        <h4>Response</h4>
-        <div id="response"></div>
-        <div class="feedback-row">
-          <button id="feedback-up" class="secondary" type="button" title="Thumbs up">👍</button>
-          <button id="feedback-down" class="secondary" type="button" title="Thumbs down">👎</button>
-          <textarea id="feedback-text" placeholder="Optional feedback text..."></textarea>
-          <button id="submit-feedback" type="button">Save Feedback</button>
+
+        <div class="tab-panel" data-tab-panel="history" hidden>
+          <div class="button-row">
+            <h4>History</h4>
+            <button id="delete-latest-history" type="button">Delete Latest</button>
+            <button id="clear-history" type="button">Clear History</button>
+          </div>
+          <div id="history"></div>
         </div>
-        <p id="feedback-status" class="muted"></p>
-        <div class="button-row">
-          <h4>Performance</h4>
-          <button id="clear-performance-trend" type="button">Clear Trend</button>
-        </div>
-        <div id="metrics"></div>
-        <h4>Performance Trend (last 20 queries)</h4>
-        <div id="performance-chart"></div>
-        <div class="button-row">
-          <h4>History</h4>
-          <button id="delete-latest-history" type="button">Delete Latest</button>
-          <button id="clear-history" type="button">Clear History</button>
-        </div>
-        <div id="history"></div>
-        <div class="button-row">
-          <h4>Feedback</h4>
-          <button id="refresh-feedback" type="button">Refresh Feedback</button>
-        </div>
-        <div id="feedback-list"></div>
-        <div class="row">
-          <h4>Diagnostics</h4>
-          <button id="copy-diagnostics" type="button">Copy Diagnostics</button>
-        </div>
-        <div id="diagnostics"></div>
       </section>
     </div>
     <footer class="footer">
