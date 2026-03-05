@@ -39,7 +39,7 @@ from app.models import (
 )
 from app.rag import RagService
 from app.storage import Storage
-from app.topics import TopicsService
+from app.topics import TopicsFetchError, TopicsService
 
 config = load_config()
 logging.basicConfig(
@@ -396,7 +396,12 @@ async def get_models(
             response.raise_for_status()
             payload = response.json()
     except Exception as exc:
-        logger.warning("Failed to fetch Ollama models from %s: %s", target_base_url, exc)
+        logger.warning(
+            "Failed to fetch Ollama models base_url=%s error_type=%s error=%s",
+            target_base_url,
+            type(exc).__name__,
+            exc,
+        )
         return ModelsResponse(provider="ollama", models=[], error=str(exc))
 
     raw_models = payload.get("models", [])
@@ -445,7 +450,13 @@ async def pull_model(request: ModelPullRequest) -> ModelPullResponse:
             response.raise_for_status()
             payload = response.json()
     except Exception as exc:
-        logger.warning("Failed to pull Ollama model name=%s: %s", model_name, exc)
+        logger.warning(
+            "Failed to pull Ollama model name=%s base_url=%s error_type=%s error=%s",
+            model_name,
+            target_base_url,
+            type(exc).__name__,
+            exc,
+        )
         raise HTTPException(status_code=502, detail=f"Failed to pull model: {exc}") from exc
 
     status = payload.get("status", "success")
@@ -471,6 +482,9 @@ async def get_topics() -> dict[str, list[str]]:
             stored_occurrences = storage.upsert_occurrences(occurrences)
             logger.info("Stored occurrences from feed count=%d", stored_occurrences)
         return topics
+    except TopicsFetchError as exc:
+        logger.warning("Topics feed request failed: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Topics feed request failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Failed to load topics feed: {exc}") from exc

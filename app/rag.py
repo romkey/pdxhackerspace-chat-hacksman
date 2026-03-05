@@ -149,7 +149,13 @@ class RagService:
             try:
                 modern_embedding = await self._embed_query_modern(query)
             except Exception as exc:
-                logger.warning("Modern embed endpoint /api/embed failed: %s", exc)
+                logger.warning(
+                    "Modern embed request failed url=%s/api/embed model=%s error_type=%s error=%s",
+                    self.embedding_url.rstrip("/"),
+                    self.embedding_model,
+                    type(exc).__name__,
+                    exc,
+                )
             if modern_embedding is not None:
                 return modern_embedding
             logger.warning("Trying legacy embed endpoint /api/embeddings")
@@ -158,7 +164,13 @@ class RagService:
                 return legacy_embedding
             logger.warning("Embedding response had no usable vector payload")
         except Exception as exc:
-            logger.exception("Embedding request failed: %s", exc)
+            logger.warning(
+                "Embedding request failed url=%s model=%s error_type=%s error=%s",
+                self.embedding_url.rstrip("/"),
+                self.embedding_model,
+                type(exc).__name__,
+                exc,
+            )
             return None
         return None
 
@@ -452,9 +464,19 @@ class RagService:
                         message,
                     )
                     continue
-                logger.exception("Qdrant search failed for %s: %s", collection, exc)
+                logger.warning(
+                    "Qdrant search failed collection=%s error_type=%s error=%s",
+                    collection,
+                    type(exc).__name__,
+                    exc,
+                )
             except Exception as exc:
-                logger.exception("Qdrant search failed for %s: %s", collection, exc)
+                logger.warning(
+                    "Qdrant search failed collection=%s error_type=%s error=%s",
+                    collection,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
 
             for hit in hits:

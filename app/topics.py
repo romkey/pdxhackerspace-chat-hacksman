@@ -10,6 +10,10 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+class TopicsFetchError(RuntimeError):
+    pass
+
+
 def _to_topic_strings(values: Any) -> list[str]:
     if not isinstance(values, list):
         return []
@@ -85,10 +89,25 @@ class TopicsService:
             return self._cache_data
 
         logger.info("Fetching topics feed from %s", self.topics_url)
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(self.topics_url)
-            response.raise_for_status()
-            payload = response.json()
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(self.topics_url)
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            if self._cache_data is not None:
+                logger.warning(
+                    "Topics feed request failed url=%s error_type=%s error=%s; using cached topics",
+                    self.topics_url,
+                    type(exc).__name__,
+                    exc,
+                )
+                return self._cache_data
+            msg = (
+                f"Failed to load topics feed url={self.topics_url} "
+                f"error_type={type(exc).__name__} error={exc}"
+            )
+            raise TopicsFetchError(msg) from exc
 
         parsed = parse_topics_payload(payload)
         events = payload.get("events", []) if isinstance(payload, dict) else []

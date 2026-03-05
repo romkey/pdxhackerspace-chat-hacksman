@@ -270,7 +270,11 @@ class LlmService:
                     continue
                 break
 
-        msg = f"LLM request failed after {max_attempts} attempt(s): {last_exc}"
+        error_type = type(last_exc).__name__ if last_exc is not None else "unknown"
+        msg = (
+            f"LLM request failed url={url} after {max_attempts} attempt(s): "
+            f"error_type={error_type} error={last_exc}"
+        )
         raise LlmError(msg)
 
     async def chat(
