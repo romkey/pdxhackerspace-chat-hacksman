@@ -45,6 +45,21 @@ def test_build_system_prompt_keeps_default_format_for_non_calibre_chunks() -> No
     assert "Safety glasses are required." in prompt
 
 
+def test_build_system_prompt_formats_calibre_alias_collection() -> None:
+    prompt = _build_system_prompt(
+        "Base prompt",
+        [
+            ContextChunk(
+                collection="calibre_ebooks",
+                score=0.85,
+                text="The text body",
+                metadata={"title": "Book", "authors": ["Author"]},
+            )
+        ],
+    )
+    assert 'Book: "Book" by Author' in prompt
+
+
 def test_build_system_prompt_formats_slack_chunk_metadata() -> None:
     prompt = _build_system_prompt(
         "Base prompt",

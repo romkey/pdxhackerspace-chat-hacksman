@@ -106,10 +106,20 @@ def test_extract_chunk_text_prefers_chunk_text() -> None:
 def test_extract_chunk_text_prefers_slack_summary_for_thread_summary() -> None:
     payload = {
         "doc_type": "thread_summary",
+        "channel_name": "ops",
         "summary": "Summary of the thread",
         "text": "Raw thread message",
     }
     assert _extract_chunk_text(payload) == "Summary of the thread"
+
+
+def test_extract_chunk_text_does_not_treat_doc_type_alone_as_slack() -> None:
+    payload = {
+        "doc_type": "event_summary",
+        "chunk_text": "Canonical event text",
+        "summary": "This should not override chunk_text",
+    }
+    assert _extract_chunk_text(payload) == "Canonical event text"
 
 
 def test_embed_query_uses_modern_embed_endpoint_first(monkeypatch) -> None:
@@ -241,6 +251,14 @@ def test_events_filter_prefers_occurrence_for_specific_past_query() -> None:
     assert "occurrence" in values
 
 
+def test_events_filter_supports_hyphenated_collection_names() -> None:
+    service = _service()
+    query_filter = service._build_collection_filter(
+        "events-community", "what upcoming events are next"
+    )
+    assert query_filter is not None
+
+
 def test_rag_expands_search_limit_when_min_score_enabled() -> None:
     service = _service()
     service.top_k = 3
@@ -308,3 +326,33 @@ def test_rag_reuses_single_qdrant_client(monkeypatch) -> None:
     second = asyncio.run(service.retrieve("two", enabled_collections=["wiki"]))
     assert first and second
     assert calls["count"] == 1
+
+
+def test_rag_final_limit_sums_collection_specific_limits(monkeypatch) -> None:
+    service = _service()
+    service.collections = ["events", "slack_general"]
+    service.top_k = 2
+    service.top_k_events = 3
+    service.top_k_slack = 3
+
+    async def fake_embed_query(self, _: str):  # noqa: ANN001
+        del self
+        return [0.1, 0.2, 0.3]
+
+    class FakeClient:
+        def query_points(self, *, collection_name, query, query_filter, with_payload, limit):
+            del query, query_filter, with_payload, limit
+            return SimpleNamespace(
+                points=[
+                    SimpleNamespace(payload={"text": f"{collection_name}-1"}, score=0.91),
+                    SimpleNamespace(payload={"text": f"{collection_name}-2"}, score=0.90),
+                ]
+            )
+
+    monkeypatch.setattr(type(service), "_embed_query", fake_embed_query)
+    monkeypatch.setattr(type(service), "_make_qdrant_client", lambda self: FakeClient())
+
+    results = asyncio.run(
+        service.retrieve("test query", enabled_collections=["events", "slack_general"])
+    )
+    assert len(results) == 4

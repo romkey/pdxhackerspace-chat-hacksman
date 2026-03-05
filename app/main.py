@@ -178,21 +178,69 @@ def _is_events_schedule_query(question: str) -> bool:
 
 def _build_fallback_events_context(limit: int = 3) -> list[ContextChunk]:
     now_unix = int(datetime.now(tz=UTC).timestamp())
-    rows = storage.get_occurrences(limit=200)
-    upcoming = [row for row in rows if row.occurs_at_unix >= now_unix]
-    selected = sorted(upcoming, key=lambda row: row.occurs_at_unix)[:limit]
-    out: list[ContextChunk] = []
-    for row in selected:
-        title = row.slug
-        if isinstance(row.payload, dict):
-            event_obj = row.payload.get("event")
+    cached_occurrences = topics_service.get_cached_occurrences()
+    selected_payloads: list[dict[str, object]] = []
+    for item in cached_occurrences:
+        occurs_at_unix_raw = item.get("occurs_at_unix")
+        if not isinstance(occurs_at_unix_raw, int):
+            continue
+        if occurs_at_unix_raw < now_unix:
+            continue
+        title = item.get("title") if isinstance(item.get("title"), str) else item.get("slug")
+        if not isinstance(title, str) or not title.strip():
+            event_obj = item.get("event")
             if isinstance(event_obj, dict):
-                maybe_title = event_obj.get("title")
-                if isinstance(maybe_title, str) and maybe_title.strip():
-                    title = maybe_title.strip()
-        text = f"{title} at {row.occurs_at}"
-        if row.open_to:
-            text += f" (open_to={row.open_to})"
+                event_title = event_obj.get("title")
+                if isinstance(event_title, str) and event_title.strip():
+                    title = event_title
+        if not isinstance(title, str) or not title.strip():
+            title = "event"
+        occurs_at = item.get("occurs_at")
+        if not isinstance(occurs_at, str) or not occurs_at.strip():
+            occurs_at = item.get("start_time")
+        if not isinstance(occurs_at, str) or not occurs_at.strip():
+            occurs_at = "unknown time"
+        selected_payloads.append(
+            {
+                "occurs_at_unix": occurs_at_unix_raw,
+                "title": title.strip(),
+                "occurs_at": occurs_at.strip(),
+                "open_to": item.get("open_to"),
+                "duration": item.get("duration"),
+            }
+        )
+
+    selected_payloads.sort(key=lambda row: int(row["occurs_at_unix"]))
+    selected_payloads = selected_payloads[:limit]
+
+    if not selected_payloads:
+        rows = storage.get_occurrences(limit=200)
+        upcoming = [row for row in rows if row.occurs_at_unix >= now_unix]
+        selected = sorted(upcoming, key=lambda row: row.occurs_at_unix)[:limit]
+        for row in selected:
+            title = row.slug
+            if isinstance(row.payload, dict):
+                event_obj = row.payload.get("event")
+                if isinstance(event_obj, dict):
+                    maybe_title = event_obj.get("title")
+                    if isinstance(maybe_title, str) and maybe_title.strip():
+                        title = maybe_title.strip()
+            selected_payloads.append(
+                {
+                    "title": title,
+                    "occurs_at": row.occurs_at,
+                    "open_to": row.open_to,
+                    "duration": row.duration,
+                }
+            )
+
+    out: list[ContextChunk] = []
+    for item in selected_payloads:
+        title = str(item["title"])
+        text = f"{title} at {item['occurs_at']}"
+        open_to = item.get("open_to")
+        if isinstance(open_to, str) and open_to.strip():
+            text += f" (open_to={open_to})"
         out.append(
             ContextChunk(
                 collection="events",
@@ -201,8 +249,8 @@ def _build_fallback_events_context(limit: int = 3) -> list[ContextChunk]:
                 metadata={
                     "title": title,
                     "record_type": "occurrence",
-                    "start_time": row.occurs_at,
-                    "duration": row.duration,
+                    "start_time": item["occurs_at"],
+                    "duration": item.get("duration"),
                     "temporal_status": "future",
                 },
             )

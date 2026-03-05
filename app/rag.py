@@ -24,13 +24,14 @@ def _is_slack_collection(collection: str) -> bool:
 
 def _is_events_collection(collection: str) -> bool:
     normalized = collection.strip().lower()
-    return normalized == "events" or normalized.startswith("events_")
+    return (
+        normalized == "events"
+        or normalized.startswith("events_")
+        or normalized.startswith("events-")
+    )
 
 
 def _is_slack_payload(payload: dict[str, Any]) -> bool:
-    doc_type = payload.get("doc_type")
-    if isinstance(doc_type, str) and doc_type.strip():
-        return True
     slack_keys = {
         "channel_name",
         "channel_id",
@@ -41,6 +42,15 @@ def _is_slack_payload(payload: dict[str, Any]) -> bool:
         "ts",
     }
     return any(key in payload for key in slack_keys)
+
+
+def _is_calibre_collection(collection: str) -> bool:
+    normalized = collection.strip().lower()
+    return (
+        normalized == "calibre_books"
+        or normalized.startswith("calibre_")
+        or normalized.startswith("calibre-")
+    )
 
 
 def _extract_slack_chunk_text(payload: dict[str, Any]) -> str:
@@ -321,7 +331,7 @@ class RagService:
         return Filter(must=must)
 
     def _top_k_for_collection(self, collection: str) -> int:
-        if collection == "calibre_books" and self.top_k_calibre is not None:
+        if _is_calibre_collection(collection) and self.top_k_calibre is not None:
             return max(1, self.top_k_calibre)
         if _is_slack_collection(collection) and self.top_k_slack is not None:
             return max(1, self.top_k_slack)
@@ -330,7 +340,7 @@ class RagService:
         return max(1, self.top_k)
 
     def _build_collection_filter(self, collection: str, query: str) -> Filter | None:
-        if collection == "calibre_books":
+        if _is_calibre_collection(collection):
             chunk_types = self._calibre_chunk_types_for_query(query)
             return Filter(
                 must=[
@@ -496,6 +506,11 @@ class RagService:
                     )
                 )
 
+        final_limit = sum(
+            self._top_k_for_collection(collection) for collection in target_collections
+        )
+        if final_limit <= 0:
+            final_limit = max(1, self.top_k)
         out.sort(key=lambda item: item.score, reverse=True)
-        logger.info("RAG retrieval produced %d usable chunks", len(out[: self.top_k]))
-        return out[: self.top_k]
+        logger.info("RAG retrieval produced %d usable chunks", len(out[:final_limit]))
+        return out[:final_limit]

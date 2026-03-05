@@ -34,7 +34,20 @@ def _is_slack_collection(collection: str) -> bool:
 
 def _is_events_collection(collection: str) -> bool:
     normalized = collection.strip().lower()
-    return normalized == "events" or normalized.startswith("events_")
+    return (
+        normalized == "events"
+        or normalized.startswith("events_")
+        or normalized.startswith("events-")
+    )
+
+
+def _is_calibre_collection(collection: str) -> bool:
+    normalized = collection.strip().lower()
+    return (
+        normalized == "calibre_books"
+        or normalized.startswith("calibre_")
+        or normalized.startswith("calibre-")
+    )
 
 
 def _to_positive_int(value: Any) -> int:
@@ -187,7 +200,7 @@ def _format_events_chunk(idx: int, chunk: ContextChunk) -> str:
 
 
 def _format_chunk(idx: int, chunk: ContextChunk) -> str:
-    if chunk.collection == "calibre_books":
+    if _is_calibre_collection(chunk.collection):
         return _format_calibre_chunk(idx, chunk)
     if _is_slack_collection(chunk.collection):
         return _format_slack_chunk(idx, chunk)
