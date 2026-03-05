@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
-from qdrant_client.http.models import FieldCondition, Filter, MatchAny
+from qdrant_client.http.models import DatetimeRange, FieldCondition, Filter, MatchAny
 
 from app.models import ContextChunk
 
@@ -19,6 +20,11 @@ def _is_slack_collection(collection: str) -> bool:
     return normalized == "slack" or normalized.startswith("slack_") or normalized.startswith(
         "slack-"
     )
+
+
+def _is_events_collection(collection: str) -> bool:
+    normalized = collection.strip().lower()
+    return normalized == "events" or normalized.startswith("events_")
 
 
 def _is_slack_payload(payload: dict[str, Any]) -> bool:
@@ -86,6 +92,9 @@ class RagService:
     embedding_url: str
     embedding_model: str
     top_k: int
+    top_k_events: int | None = None
+    top_k_slack: int | None = None
+    top_k_calibre: int | None = None
     embedding_timeout_seconds: float = 30.0
     min_score: float = 0.0
     _collection_vector_dims: dict[str, int | None] = field(default_factory=dict)
@@ -161,7 +170,8 @@ class RagService:
         vector: list[float],
         query_filter: Filter | None = None,
     ) -> list[Any]:
-        search_limit = self.top_k * 2 if self.min_score > 0 else self.top_k
+        target_top_k = self._top_k_for_collection(collection)
+        search_limit = target_top_k * 2 if self.min_score > 0 else target_top_k
         if hasattr(client, "search"):
             try:
                 hits = client.search(
@@ -247,6 +257,66 @@ class RagService:
             return ["thread_summary", "message"]
         return None
 
+    def _events_filter_for_query(self, query: str) -> Filter | None:
+        tokens = set(query.strip().lower().split())
+        past_words = {"past", "previous", "last", "history", "happened", "was", "ran"}
+        future_words = {"upcoming", "next", "future", "soon", "scheduled", "when", "will"}
+        now_words = {"now", "today", "current", "happening", "ongoing"}
+        summary_words = {"often", "frequency", "recurring", "regular", "schedule", "series"}
+        occurrence_words = {"happened", "specific", "that", "tuesday", "week"}
+        now_iso = datetime.now(tz=UTC).isoformat()
+
+        must: list[FieldCondition] = []
+        if tokens & future_words:
+            must.append(
+                FieldCondition(
+                    key="start_time",
+                    range=DatetimeRange(gte=now_iso),
+                )
+            )
+        elif tokens & now_words:
+            must.append(
+                FieldCondition(
+                    key="temporal_status",
+                    match=MatchAny(any=["current", "future"]),
+                )
+            )
+        elif tokens & past_words:
+            must.append(
+                FieldCondition(
+                    key="start_time",
+                    range=DatetimeRange(lt=now_iso),
+                )
+            )
+
+        if tokens & summary_words:
+            must.append(
+                FieldCondition(
+                    key="record_type",
+                    match=MatchAny(any=["event_summary"]),
+                )
+            )
+        elif tokens & occurrence_words:
+            must.append(
+                FieldCondition(
+                    key="record_type",
+                    match=MatchAny(any=["occurrence"]),
+                )
+            )
+
+        if not must:
+            return None
+        return Filter(must=must)
+
+    def _top_k_for_collection(self, collection: str) -> int:
+        if collection == "calibre_books" and self.top_k_calibre is not None:
+            return max(1, self.top_k_calibre)
+        if _is_slack_collection(collection) and self.top_k_slack is not None:
+            return max(1, self.top_k_slack)
+        if _is_events_collection(collection) and self.top_k_events is not None:
+            return max(1, self.top_k_events)
+        return max(1, self.top_k)
+
     def _build_collection_filter(self, collection: str, query: str) -> Filter | None:
         if collection == "calibre_books":
             chunk_types = self._calibre_chunk_types_for_query(query)
@@ -269,6 +339,8 @@ class RagService:
                         )
                     ]
                 )
+        if _is_events_collection(collection):
+            return self._events_filter_for_query(query)
         return None
 
     def _extract_vector_dim(self, collection_info: Any) -> int | None:

@@ -25,6 +25,7 @@ from app.models import (
     AppSettings,
     ChatRequest,
     ChatResponse,
+    ContextChunk,
     FeedbackCreateRequest,
     LlmBaseUrlsResponse,
     LlmBaseUrlStatusesResponse,
@@ -63,6 +64,9 @@ rag_service = RagService(
     embedding_url=config.embedding_url,
     embedding_model=config.embedding_model,
     top_k=config.rag_top_k,
+    top_k_events=config.rag_top_k_events,
+    top_k_slack=config.rag_top_k_slack,
+    top_k_calibre=config.rag_top_k_calibre,
     min_score=config.rag_min_score,
     embedding_timeout_seconds=config.embedding_timeout_seconds,
 )
@@ -153,6 +157,57 @@ async def _check_provider_availability(base_url: str) -> bool:
             return True
     except Exception:
         return False
+
+
+def _is_events_schedule_query(question: str) -> bool:
+    tokens = set(question.strip().lower().split())
+    schedule_words = {
+        "event",
+        "events",
+        "upcoming",
+        "next",
+        "schedule",
+        "when",
+        "today",
+        "tomorrow",
+        "week",
+        "month",
+    }
+    return bool(tokens & schedule_words)
+
+
+def _build_fallback_events_context(limit: int = 3) -> list[ContextChunk]:
+    now_unix = int(datetime.now(tz=UTC).timestamp())
+    rows = storage.get_occurrences(limit=200)
+    upcoming = [row for row in rows if row.occurs_at_unix >= now_unix]
+    selected = sorted(upcoming, key=lambda row: row.occurs_at_unix)[:limit]
+    out: list[ContextChunk] = []
+    for row in selected:
+        title = row.slug
+        if isinstance(row.payload, dict):
+            event_obj = row.payload.get("event")
+            if isinstance(event_obj, dict):
+                maybe_title = event_obj.get("title")
+                if isinstance(maybe_title, str) and maybe_title.strip():
+                    title = maybe_title.strip()
+        text = f"{title} at {row.occurs_at}"
+        if row.open_to:
+            text += f" (open_to={row.open_to})"
+        out.append(
+            ContextChunk(
+                collection="events",
+                score=1.0,
+                text=text,
+                metadata={
+                    "title": title,
+                    "record_type": "occurrence",
+                    "start_time": row.occurs_at,
+                    "duration": row.duration,
+                    "temporal_status": "future",
+                },
+            )
+        )
+    return out
 
 
 def _basic_auth_valid(authorization_header: str | None) -> bool:
@@ -491,6 +546,12 @@ async def post_chat(request: ChatRequest, http_request: Request) -> ChatResponse
             request.question,
             enabled_collections=enabled_collections,
         )
+        if (
+            "events" in set(enabled_collections)
+            and _is_events_schedule_query(request.question)
+            and not any(chunk.collection == "events" for chunk in context)
+        ):
+            context.extend(_build_fallback_events_context(limit=3))
     else:
         logger.info("Chat request with RAG disabled client_ip=%s", client_ip)
         context = []

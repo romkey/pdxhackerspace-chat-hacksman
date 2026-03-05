@@ -204,6 +204,43 @@ def test_slack_filter_returns_none_when_no_intent_words() -> None:
     assert query_filter is None
 
 
+def test_events_filter_future_uses_start_time_range() -> None:
+    service = _service()
+    query_filter = service._build_collection_filter("events", "what upcoming events are next")
+    assert query_filter is not None
+    assert query_filter.must
+    condition = query_filter.must[0]
+    assert getattr(condition, "key", "") == "start_time"
+    value_range = getattr(condition, "range", None)
+    assert getattr(value_range, "gte", None) is not None
+
+
+def test_events_filter_prefers_event_summary_for_schedule_queries() -> None:
+    service = _service()
+    query_filter = service._build_collection_filter("events", "what is the regular schedule")
+    assert query_filter is not None
+    keys = [getattr(item, "key", "") for item in query_filter.must]
+    assert "record_type" in keys
+    record_condition = next(
+        item for item in query_filter.must if getattr(item, "key", "") == "record_type"
+    )
+    values = getattr(getattr(record_condition, "match", None), "any", [])
+    assert "event_summary" in values
+
+
+def test_events_filter_prefers_occurrence_for_specific_past_query() -> None:
+    service = _service()
+    query_filter = service._build_collection_filter("events", "what happened that tuesday")
+    assert query_filter is not None
+    keys = [getattr(item, "key", "") for item in query_filter.must]
+    assert "record_type" in keys
+    record_condition = next(
+        item for item in query_filter.must if getattr(item, "key", "") == "record_type"
+    )
+    values = getattr(getattr(record_condition, "match", None), "any", [])
+    assert "occurrence" in values
+
+
 def test_rag_expands_search_limit_when_min_score_enabled() -> None:
     service = _service()
     service.top_k = 3
@@ -223,6 +260,27 @@ def test_rag_expands_search_limit_when_min_score_enabled() -> None:
         query_filter=None,
     )
     assert captured["limit"] == 6
+
+
+def test_rag_uses_collection_specific_top_k_for_events() -> None:
+    service = _service()
+    service.top_k = 2
+    service.top_k_events = 5
+    captured: dict[str, int] = {}
+
+    class FakeClient:
+        def query_points(self, *, collection_name, query, query_filter, with_payload, limit):
+            del collection_name, query, query_filter, with_payload
+            captured["limit"] = limit
+            return SimpleNamespace(points=[])
+
+    service._search_collection(
+        client=FakeClient(),
+        collection="events",
+        vector=[0.1, 0.2],
+        query_filter=None,
+    )
+    assert captured["limit"] == 5
 
 
 def test_rag_reuses_single_qdrant_client(monkeypatch) -> None:

@@ -101,3 +101,50 @@ def test_build_system_prompt_does_not_add_slack_guidance_without_slack_chunks() 
         ],
     )
     assert "For Slack context: cite channels as #channel-name" not in prompt
+
+
+def test_build_system_prompt_formats_events_chunk_metadata() -> None:
+    prompt = _build_system_prompt(
+        "Base prompt",
+        [
+            ContextChunk(
+                collection="events",
+                score=0.93,
+                text="Laser cutter training this week.",
+                metadata={
+                    "title": "Laser Cutter Training",
+                    "record_type": "event_summary",
+                    "frequency": "weekly",
+                    "occurrence_count": 12,
+                    "has_future_occurrences": True,
+                    "next_start_time": "2026-03-10T18:00:00-08:00",
+                    "duration": 120,
+                    "location": "Section 2",
+                    "tags": ["training", "laser"],
+                    "temporal_status": "future",
+                    "source_url": "https://events.example/laser",
+                },
+            )
+        ],
+    )
+    assert "Event: Laser Cutter Training" in prompt
+    assert "Schedule: weekly (12 occurrences)" in prompt
+    assert "Upcoming: yes" in prompt
+    assert "Where: Section 2" in prompt
+    assert "Tags: training, laser" in prompt
+    assert "Link: https://events.example/laser" in prompt
+
+
+def test_build_system_prompt_adds_events_guidance_when_present() -> None:
+    prompt = _build_system_prompt(
+        "Base prompt",
+        [
+            ContextChunk(
+                collection="events",
+                score=0.8,
+                text="Upcoming open house",
+                metadata={},
+            )
+        ],
+    )
+    assert "For events context: always mention the date and time" in prompt

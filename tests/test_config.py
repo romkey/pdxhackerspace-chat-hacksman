@@ -22,3 +22,14 @@ def test_load_config_reads_basic_auth_env(monkeypatch) -> None:
     config = load_config()
     assert config.basic_auth_username == "demo"
     assert config.basic_auth_password == "secret"
+
+
+def test_load_config_reads_collection_specific_top_k_env(monkeypatch) -> None:
+    monkeypatch.setenv("RAG_TOP_K_EVENTS", "7")
+    monkeypatch.setenv("RAG_TOP_K_SLACK", "6")
+    monkeypatch.setenv("RAG_TOP_K_CALIBRE", "5")
+
+    config = load_config()
+    assert config.rag_top_k_events == 7
+    assert config.rag_top_k_slack == 6
+    assert config.rag_top_k_calibre == 5

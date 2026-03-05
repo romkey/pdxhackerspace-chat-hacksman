@@ -38,6 +38,8 @@ See `.env.example`. Key vars:
 
 - `RAG_COLLECTIONS` as a comma-separated list, or `RAG_COLLECTION_1..5`.
 - `RAG_TOP_K` and `RAG_MIN_SCORE` tune retrieval breadth and minimum similarity.
+- `RAG_TOP_K_EVENTS`, `RAG_TOP_K_SLACK`, `RAG_TOP_K_CALIBRE` tune per-collection retrieval
+  breadth before final cross-collection merge/trim.
 - `RAG_TOPICS_URL` for topic feed buttons.
 - `GET /api/events` returns stored events from the feed.
 - `GET /api/occurrences` returns stored occurrences from the feed.

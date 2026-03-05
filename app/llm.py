@@ -32,6 +32,11 @@ def _is_slack_collection(collection: str) -> bool:
     )
 
 
+def _is_events_collection(collection: str) -> bool:
+    normalized = collection.strip().lower()
+    return normalized == "events" or normalized.startswith("events_")
+
+
 def _to_positive_int(value: Any) -> int:
     if isinstance(value, bool):
         return 0
@@ -122,11 +127,72 @@ def _format_slack_chunk(idx: int, chunk: ContextChunk) -> str:
     return result
 
 
+def _format_events_chunk(idx: int, chunk: ContextChunk) -> str:
+    metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
+    parts: list[str] = []
+
+    title = metadata.get("title")
+    if isinstance(title, str) and title.strip():
+        parts.append(f"Event: {title.strip()}")
+
+    record_type = metadata.get("record_type")
+    if record_type == "event_summary":
+        freq = metadata.get("frequency")
+        count = metadata.get("occurrence_count")
+        if isinstance(freq, str) and freq.strip() and isinstance(count, int):
+            parts.append(f"Schedule: {freq.strip()} ({count} occurrences)")
+        has_future = metadata.get("has_future_occurrences")
+        if isinstance(has_future, bool):
+            parts.append("Upcoming: yes" if has_future else "Upcoming: no")
+
+    start = metadata.get("start_time") or metadata.get("next_start_time")
+    if isinstance(start, str) and start.strip():
+        parts.append(f"When: {start.strip()}")
+
+    duration = metadata.get("duration")
+    if isinstance(duration, int) and duration > 0:
+        parts.append(f"Duration: {duration}")
+    elif isinstance(duration, str) and duration.strip():
+        parts.append(f"Duration: {duration.strip()}")
+
+    location: str | None = None
+    raw_location = metadata.get("location")
+    if isinstance(raw_location, str) and raw_location.strip():
+        location = raw_location.strip()
+    else:
+        locations = metadata.get("locations")
+        if isinstance(locations, list):
+            names = [str(item).strip() for item in locations if str(item).strip()]
+            if names:
+                location = ", ".join(names)
+    if location:
+        parts.append(f"Where: {location}")
+
+    tags = metadata.get("tags")
+    if isinstance(tags, list):
+        tag_names = [str(item).strip() for item in tags if str(item).strip()]
+        if tag_names:
+            parts.append(f"Tags: {', '.join(tag_names)}")
+
+    temporal = metadata.get("temporal_status")
+    if isinstance(temporal, str) and temporal.strip():
+        parts.append(f"Status: {temporal.strip()}")
+
+    header = " | ".join(parts) if parts else f"collection={chunk.collection}"
+    result = f"[{idx}] {header} (score={chunk.score:.4f})\n{chunk.text}"
+    source_url = metadata.get("source_url")
+    if isinstance(source_url, str) and source_url.strip():
+        result += f"\nLink: {source_url.strip()}"
+    return result
+
+
 def _format_chunk(idx: int, chunk: ContextChunk) -> str:
     if chunk.collection == "calibre_books":
         return _format_calibre_chunk(idx, chunk)
     if _is_slack_collection(chunk.collection):
         return _format_slack_chunk(idx, chunk)
+    if _is_events_collection(chunk.collection):
+        return _format_events_chunk(idx, chunk)
     return f"[{idx}] collection={chunk.collection} score={chunk.score:.4f}\n{chunk.text}"
 
 
@@ -135,6 +201,7 @@ def _build_system_prompt(base_prompt: str, context: list[ContextChunk]) -> str:
         return base_prompt
 
     has_slack = any(_is_slack_collection(chunk.collection) for chunk in context)
+    has_events = any(_is_events_collection(chunk.collection) for chunk in context)
     context_parts = []
     for idx, chunk in enumerate(context, start=1):
         context_parts.append(_format_chunk(idx, chunk))
@@ -149,6 +216,14 @@ def _build_system_prompt(base_prompt: str, context: list[ContextChunk]) -> str:
             "When recommending channels, prefer those with higher activity and reaction counts. "
             "Include permalinks when available so members can read the full thread. "
             "Messages with many reactions were found valuable by the community."
+        )
+    if has_events:
+        guidance += (
+            "\n\nFor events context: always mention the date and time when discussing events. "
+            "Distinguish between upcoming events (status: future/current) and past ones. "
+            "For recurring events, mention the frequency. "
+            "Note that event information is periodically synchronized and may not reflect very "
+            "recent changes - direct members to the source URL to confirm details."
         )
     return (
         f"{base_prompt}\n\n"
