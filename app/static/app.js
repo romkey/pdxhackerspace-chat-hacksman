@@ -740,7 +740,8 @@ async function loadHistory() {
 
     const meta = document.createElement("div");
     meta.className = "history-meta";
-    meta.textContent = `${item.created_at} | ${item.provider}/${item.model}`;
+    const promptPart = item.prompt_id ? ` | prompt #${item.prompt_id}` : "";
+    meta.textContent = `${item.created_at} | ${item.provider}/${item.model}${promptPart}`;
     wrapper.appendChild(meta);
 
     const qa = document.createElement("pre");
@@ -757,6 +758,29 @@ async function loadHistory() {
         `tokens/sec=${lastMetrics.tokens_per_second ?? "n/a"}, ` +
         `chunks=${lastMetrics.context_chunks_used ?? "n/a"}`;
       wrapper.appendChild(perf);
+    }
+
+    if (typeof item.system_prompt === "string" && item.system_prompt.trim()) {
+      const promptToggle = document.createElement("button");
+      promptToggle.type = "button";
+      promptToggle.className = "history-prompt-toggle";
+      promptToggle.textContent = "View prompt";
+      promptToggle.setAttribute("aria-expanded", "false");
+
+      const promptBody = document.createElement("pre");
+      promptBody.className = "history-prompt";
+      promptBody.hidden = true;
+      promptBody.textContent = item.system_prompt;
+
+      promptToggle.addEventListener("click", () => {
+        const isOpen = !promptBody.hidden;
+        promptBody.hidden = isOpen;
+        promptToggle.textContent = isOpen ? "View prompt" : "Hide prompt";
+        promptToggle.setAttribute("aria-expanded", isOpen ? "false" : "true");
+      });
+
+      wrapper.appendChild(promptToggle);
+      wrapper.appendChild(promptBody);
     }
 
     fields.history.appendChild(wrapper);

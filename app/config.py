@@ -25,6 +25,7 @@ class AppConfig:
     rag_min_score: float
     embedding_url: str
     embedding_model: str
+    embedding_context_length: int
     embedding_timeout_seconds: float
     llm_timeout_seconds: float
     llm_retry_attempts: int
@@ -71,6 +72,7 @@ def load_config() -> AppConfig:
         rag_min_score=float(os.getenv("RAG_MIN_SCORE", "0.5")),
         embedding_url=os.getenv("EMBEDDING_URL", "http://localhost:11434"),
         embedding_model=os.getenv("EMBEDDING_MODEL", "nomic-embed-text"),
+        embedding_context_length=int(os.getenv("EMBEDDING_CONTEXT_LENGTH", "8192")),
         embedding_timeout_seconds=float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "30")),
         llm_timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "180")),
         llm_retry_attempts=int(os.getenv("LLM_RETRY_ATTEMPTS", "2")),

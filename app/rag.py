@@ -105,6 +105,7 @@ class RagService:
     top_k_events: int | None = None
     top_k_slack: int | None = None
     top_k_calibre: int | None = None
+    embedding_context_length: int = 8192
     embedding_timeout_seconds: float = 30.0
     min_score: float = 0.0
     _collection_vector_dims: dict[str, int | None] = field(default_factory=dict)
@@ -148,8 +149,41 @@ class RagService:
             return [float(x) for x in embedding]
         return None
 
+    def _truncate_query_for_embedding(self, query: str) -> str:
+        limit = max(1, int(self.embedding_context_length))
+        max_chars = max(128, limit * 4)
+        normalized = query.strip()
+        if not normalized:
+            return query
+
+        tokens = normalized.split()
+        if len(tokens) > limit:
+            truncated = " ".join(tokens[:limit])
+            logger.warning(
+                "Embedding input exceeded configured context length model=%s "
+                "estimated_tokens=%d limit=%d; truncating",
+                self.embedding_model,
+                len(tokens),
+                limit,
+            )
+            return truncated
+
+        if len(normalized) > max_chars:
+            logger.warning(
+                "Embedding input exceeded configured char budget model=%s chars=%d "
+                "char_limit=%d (context_length=%d); truncating",
+                self.embedding_model,
+                len(normalized),
+                max_chars,
+                limit,
+            )
+            return normalized[:max_chars]
+
+        return normalized
+
     async def _embed_query(self, query: str) -> list[float] | None:
         try:
+            embedding_query = self._truncate_query_for_embedding(query)
             logger.info(
                 "Creating embedding for query using model=%s at %s",
                 self.embedding_model,
@@ -157,7 +191,7 @@ class RagService:
             )
             modern_embedding: list[float] | None = None
             try:
-                modern_embedding = await self._embed_query_modern(query)
+                modern_embedding = await self._embed_query_modern(embedding_query)
             except Exception as exc:
                 logger.warning(
                     "Modern embed request failed url=%s/api/embed model=%s error_type=%s error=%s",
@@ -169,7 +203,7 @@ class RagService:
             if modern_embedding is not None:
                 return modern_embedding
             logger.warning("Trying legacy embed endpoint /api/embeddings")
-            legacy_embedding = await self._embed_query_legacy(query)
+            legacy_embedding = await self._embed_query_legacy(embedding_query)
             if legacy_embedding is not None:
                 return legacy_embedding
             logger.warning("Embedding response had no usable vector payload")

@@ -158,6 +158,44 @@ def test_embed_query_falls_back_to_legacy_endpoint(monkeypatch) -> None:
     assert vector == [0.7, 0.8]
 
 
+def test_embed_query_truncates_to_embedding_context_length(monkeypatch) -> None:
+    service = _service()
+    service.embedding_context_length = 3
+
+    captured: dict[str, str] = {}
+
+    async def fake_modern(self, query):  # noqa: ANN001
+        del self
+        captured["query"] = query
+        return [0.5, 0.6]
+
+    monkeypatch.setattr(type(service), "_embed_query_modern", fake_modern)
+    monkeypatch.setattr(type(service), "_embed_query_legacy", fake_modern)
+
+    vector = asyncio.run(service._embed_query("one two three four five"))
+    assert vector == [0.5, 0.6]
+    assert captured["query"] == "one two three"
+
+
+def test_embed_query_truncates_long_single_token_input(monkeypatch) -> None:
+    service = _service()
+    service.embedding_context_length = 2
+
+    captured: dict[str, str] = {}
+
+    async def fake_modern(self, query):  # noqa: ANN001
+        del self
+        captured["query"] = query
+        return [0.5, 0.6]
+
+    monkeypatch.setattr(type(service), "_embed_query_modern", fake_modern)
+    monkeypatch.setattr(type(service), "_embed_query_legacy", fake_modern)
+
+    vector = asyncio.run(service._embed_query("x" * 1000))
+    assert vector == [0.5, 0.6]
+    assert len(captured["query"]) == 128
+
+
 def test_rag_retrieve_applies_min_score(monkeypatch) -> None:
     service = _service()
     service.min_score = 0.5

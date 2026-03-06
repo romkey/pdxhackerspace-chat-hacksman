@@ -132,6 +132,7 @@ class ChatResponse(BaseModel):
 class HistoryRecord(BaseModel):
     id: int
     created_at: datetime
+    prompt_id: int | None = None
     provider: str
     model: str
     system_prompt: str

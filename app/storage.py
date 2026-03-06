@@ -44,6 +44,15 @@ class Storage:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS prompt_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    prompt_text TEXT NOT NULL UNIQUE
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS chat_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     created_at TEXT NOT NULL,
@@ -58,6 +67,7 @@ class Storage:
                 )
                 """
             )
+            self._ensure_chat_history_prompt_id_column(conn)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS feed_events (
@@ -130,6 +140,31 @@ class Storage:
                 """
             )
             conn.commit()
+
+    def _ensure_chat_history_prompt_id_column(self, conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(chat_history)").fetchall()
+        names = {str(row["name"]) for row in columns}
+        if "prompt_id" not in names:
+            conn.execute("ALTER TABLE chat_history ADD COLUMN prompt_id INTEGER")
+
+    def _ensure_prompt_id(self, conn: sqlite3.Connection, system_prompt: str) -> int:
+        normalized_prompt = system_prompt.strip()
+        row = conn.execute(
+            "SELECT id FROM prompt_history WHERE prompt_text = ? LIMIT 1",
+            (normalized_prompt,),
+        ).fetchone()
+        if row:
+            return int(row["id"])
+        created_at = datetime.now(UTC).isoformat()
+        cursor = conn.execute(
+            """
+            INSERT INTO prompt_history (created_at, prompt_text)
+            VALUES (?, ?)
+            """,
+            (created_at, normalized_prompt),
+        )
+        row_id = cursor.lastrowid
+        return int(row_id) if row_id is not None else 0
 
     def get_settings(self) -> AppSettings:
         with self._connect() as conn:
@@ -261,6 +296,7 @@ class Storage:
     ) -> int:
         created_at = datetime.now(UTC).isoformat()
         with self._connect() as conn:
+            prompt_id = self._ensure_prompt_id(conn, system_prompt)
             cursor = conn.execute(
                 """
                 INSERT INTO chat_history (
@@ -272,9 +308,10 @@ class Storage:
                     answer,
                     rag_collections_json,
                     rag_hits,
-                    config_snapshot_json
+                    config_snapshot_json,
+                    prompt_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     created_at,
@@ -286,6 +323,7 @@ class Storage:
                     json.dumps(rag_collections),
                     rag_hits,
                     json.dumps(config_snapshot),
+                    prompt_id if prompt_id > 0 else None,
                 ),
             )
             conn.commit()
@@ -300,6 +338,7 @@ class Storage:
                 SELECT
                     id,
                     created_at,
+                    prompt_id,
                     provider,
                     model,
                     system_prompt,
@@ -321,6 +360,7 @@ class Storage:
                 HistoryRecord(
                     id=row["id"],
                     created_at=datetime.fromisoformat(row["created_at"]),
+                    prompt_id=row["prompt_id"],
                     provider=row["provider"],
                     model=row["model"],
                     system_prompt=row["system_prompt"],

@@ -33,3 +33,9 @@ def test_load_config_reads_collection_specific_top_k_env(monkeypatch) -> None:
     assert config.rag_top_k_events == 7
     assert config.rag_top_k_slack == 6
     assert config.rag_top_k_calibre == 5
+
+
+def test_load_config_reads_embedding_context_length(monkeypatch) -> None:
+    monkeypatch.setenv("EMBEDDING_CONTEXT_LENGTH", "2048")
+    config = load_config()
+    assert config.embedding_context_length == 2048

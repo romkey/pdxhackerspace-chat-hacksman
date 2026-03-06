@@ -190,6 +190,42 @@ def test_chat_endpoint_records_history(monkeypatch) -> None:
         rows = history_resp.json()
         assert rows
         assert rows[0]["question"] == "What PPE do I need?"
+        assert isinstance(rows[0]["prompt_id"], int)
+
+
+def test_history_links_saved_chats_to_prompt_ids(monkeypatch) -> None:
+    async def fake_retrieve(self, _: str, enabled_collections=None):  # noqa: ANN001
+        del self, enabled_collections
+        return []
+
+    async def fake_chat(self, *, settings, question, context):  # noqa: ANN001
+        del self, settings, question, context
+        return SimpleNamespace(
+            answer="ok",
+            input_tokens=1,
+            output_tokens=1,
+            total_tokens=2,
+            llm_latency_ms=1.0,
+            tokens_per_second=1000.0,
+            provider_metrics={},
+        )
+
+    monkeypatch.setattr(type(rag_service), "retrieve", fake_retrieve)
+    monkeypatch.setattr(type(llm_service), "chat", fake_chat)
+
+    with TestClient(app) as client:
+        client.delete("/api/history")
+        first = client.post("/api/chat", json={"question": "first", "use_rag": False})
+        second = client.post("/api/chat", json={"question": "second", "use_rag": False})
+        assert first.status_code == 200
+        assert second.status_code == 200
+
+        history_resp = client.get("/api/history?limit=2")
+        assert history_resp.status_code == 200
+        rows = history_resp.json()
+        assert len(rows) == 2
+        assert isinstance(rows[0]["prompt_id"], int)
+        assert rows[0]["prompt_id"] == rows[1]["prompt_id"]
 
 
 def test_delete_history_endpoint(monkeypatch) -> None:

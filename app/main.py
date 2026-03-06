@@ -63,6 +63,7 @@ rag_service = RagService(
     collections=config.rag_collections,
     embedding_url=config.embedding_url,
     embedding_model=config.embedding_model,
+    embedding_context_length=config.embedding_context_length,
     top_k=config.rag_top_k,
     top_k_events=config.rag_top_k_events,
     top_k_slack=config.rag_top_k_slack,

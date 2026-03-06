@@ -66,3 +66,45 @@ def test_storage_upsert_and_get_occurrences(tmp_path: Path) -> None:
     assert len(loaded) == 1
     assert loaded[0].occurrence_id == 101
     assert loaded[0].event_id == 16
+
+
+def test_storage_history_links_chat_to_prompt_history(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "history-prompts.db")
+    settings = AppSettings(
+        provider="ollama",
+        llm_base_url="http://localhost:11434",
+        model="llama3.2:latest",
+        system_prompt="test",
+    )
+    storage = Storage(db_path=db_path, default_settings=settings)
+
+    first_id = storage.append_history(
+        provider="ollama",
+        model="llama3.2:latest",
+        system_prompt="Prompt A",
+        question="q1",
+        answer="a1",
+        rag_collections=["events"],
+        rag_hits=1,
+        config_snapshot={},
+    )
+    second_id = storage.append_history(
+        provider="ollama",
+        model="llama3.2:latest",
+        system_prompt="Prompt A",
+        question="q2",
+        answer="a2",
+        rag_collections=["events"],
+        rag_hits=1,
+        config_snapshot={},
+    )
+    assert first_id > 0
+    assert second_id > 0
+
+    rows = storage.get_history(limit=10)
+    assert len(rows) == 2
+    assert rows[0].system_prompt == "Prompt A"
+    assert rows[1].system_prompt == "Prompt A"
+    assert isinstance(rows[0].prompt_id, int)
+    assert isinstance(rows[1].prompt_id, int)
+    assert rows[0].prompt_id == rows[1].prompt_id
