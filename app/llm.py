@@ -92,7 +92,6 @@ def _format_calibre_chunk(idx: int, chunk: ContextChunk) -> str:
         header_parts.append(f"Source: {source_url.strip()}")
 
     header_parts.append(f"collection={chunk.collection}")
-    header_parts.append(f"score={chunk.score:.4f}")
     header = " | ".join(header_parts)
     return f"[{idx}] {header}\n{chunk.text}"
 
@@ -132,7 +131,7 @@ def _format_slack_chunk(idx: int, chunk: ContextChunk) -> str:
         header_parts.append(f"{reaction_count} reactions")
 
     header = " | ".join(header_parts) if header_parts else f"collection={chunk.collection}"
-    result = f"[{idx}] {header} (score={chunk.score:.4f})\n{chunk.text}"
+    result = f"[{idx}] {header}\n{chunk.text}"
 
     permalink = metadata.get("permalink")
     if isinstance(permalink, str) and permalink.strip():
@@ -192,7 +191,7 @@ def _format_events_chunk(idx: int, chunk: ContextChunk) -> str:
         parts.append(f"Status: {temporal.strip()}")
 
     header = " | ".join(parts) if parts else f"collection={chunk.collection}"
-    result = f"[{idx}] {header} (score={chunk.score:.4f})\n{chunk.text}"
+    result = f"[{idx}] {header}\n{chunk.text}"
     source_url = metadata.get("source_url")
     if isinstance(source_url, str) and source_url.strip():
         result += f"\nLink: {source_url.strip()}"
@@ -206,7 +205,7 @@ def _format_chunk(idx: int, chunk: ContextChunk) -> str:
         return _format_slack_chunk(idx, chunk)
     if _is_events_collection(chunk.collection):
         return _format_events_chunk(idx, chunk)
-    return f"[{idx}] collection={chunk.collection} score={chunk.score:.4f}\n{chunk.text}"
+    return f"[{idx}] collection={chunk.collection}\n{chunk.text}"
 
 
 def _build_system_prompt(base_prompt: str, context: list[ContextChunk]) -> str:

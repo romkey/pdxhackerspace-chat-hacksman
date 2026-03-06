@@ -41,8 +41,24 @@ def test_build_system_prompt_keeps_default_format_for_non_calibre_chunks() -> No
             )
         ],
     )
-    assert "collection=wiki score=0.9100" in prompt
+    assert "collection=wiki" in prompt
     assert "Safety glasses are required." in prompt
+
+
+def test_build_system_prompt_does_not_include_retrieval_scores() -> None:
+    prompt = _build_system_prompt(
+        "Base prompt",
+        [
+            ContextChunk(
+                collection="wiki",
+                score=0.91,
+                text="Safety glasses are required.",
+                metadata={},
+            )
+        ],
+    )
+    assert "score=" not in prompt
+    assert "(score:" not in prompt
 
 
 def test_build_system_prompt_formats_calibre_alias_collection() -> None:
