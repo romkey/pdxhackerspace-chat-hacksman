@@ -46,6 +46,7 @@ See `.env.example`. Key vars:
 - `DEFAULT_PROVIDER` (`ollama` or `llama_cpp`).
 - `DEFAULT_LLM_BASE_URL`, `DEFAULT_MODEL`, `DEFAULT_SYSTEM_PROMPT`.
 - `BASIC_AUTH_USERNAME` and `BASIC_AUTH_PASSWORD` to enable optional HTTP basic auth.
+- `SENTRY_DSN` to enable Sentry error reporting.
 - `EMBEDDING_TIMEOUT_SECONDS` for embedding calls used by RAG lookup.
 - `EMBEDDING_CONTEXT_LENGTH` to cap embedding input size; overly long questions are truncated before embedding.
 - `LLM_TIMEOUT_SECONDS`, `LLM_RETRY_ATTEMPTS`, `LLM_RETRY_BACKOFF_SECONDS` to handle transient model server disconnects/timeouts.

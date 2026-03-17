@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import importlib
 import logging
 import secrets
 import socket
@@ -105,6 +106,25 @@ def _detect_app_version() -> str:
 
 
 APP_VERSION = _detect_app_version()
+
+
+def _configure_sentry() -> None:
+    sentry_dsn = (config.sentry_dsn or "").strip()
+    if not sentry_dsn:
+        return
+    try:
+        sentry_sdk = importlib.import_module("sentry_sdk")
+    except Exception:
+        logger.warning("SENTRY_DSN is set but sentry-sdk is not installed; skipping Sentry init")
+        return
+    sentry_sdk.init(
+        dsn=sentry_dsn,
+        release=f"chat-hacksman@{APP_VERSION}",
+    )
+    logger.info("Sentry is enabled for error reporting")
+
+
+_configure_sentry()
 
 app = FastAPI(title="Chat Hacksman")
 app.add_middleware(

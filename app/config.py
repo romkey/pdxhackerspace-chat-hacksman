@@ -36,6 +36,7 @@ class AppConfig:
     default_system_prompt: str
     basic_auth_username: str | None
     basic_auth_password: str | None
+    sentry_dsn: str | None
     log_level: str
     repo_url: str
 
@@ -86,6 +87,7 @@ def load_config() -> AppConfig:
         ),
         basic_auth_username=os.getenv("BASIC_AUTH_USERNAME") or None,
         basic_auth_password=os.getenv("BASIC_AUTH_PASSWORD") or None,
+        sentry_dsn=os.getenv("SENTRY_DSN") or None,
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         repo_url=os.getenv(
             "REPO_URL",

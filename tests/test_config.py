@@ -39,3 +39,9 @@ def test_load_config_reads_embedding_context_length(monkeypatch) -> None:
     monkeypatch.setenv("EMBEDDING_CONTEXT_LENGTH", "2048")
     config = load_config()
     assert config.embedding_context_length == 2048
+
+
+def test_load_config_reads_sentry_dsn(monkeypatch) -> None:
+    monkeypatch.setenv("SENTRY_DSN", "https://public@example.ingest.sentry.io/1")
+    config = load_config()
+    assert config.sentry_dsn == "https://public@example.ingest.sentry.io/1"
