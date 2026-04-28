@@ -71,11 +71,13 @@ rag_service = RagService(
     top_k_calibre=config.rag_top_k_calibre,
     min_score=config.rag_min_score,
     embedding_timeout_seconds=config.embedding_timeout_seconds,
+    ollama_api_key=config.ollama_api_key,
 )
 llm_service = LlmService(
     request_timeout_seconds=config.llm_timeout_seconds,
     retry_attempts=config.llm_retry_attempts,
     retry_backoff_seconds=config.llm_retry_backoff_seconds,
+    ollama_api_key=config.ollama_api_key,
 )
 logger.info(
     "Configured Qdrant collections from env: %s",
@@ -170,11 +172,17 @@ def _resolve_provider_ip(base_url: str) -> str:
         return "unknown"
 
 
+def _ollama_request_kwargs() -> dict[str, dict[str, str]]:
+    if not config.ollama_api_key:
+        return {}
+    return {"headers": {"Authorization": f"Bearer {config.ollama_api_key}"}}
+
+
 async def _check_provider_availability(base_url: str) -> bool:
     url = base_url.rstrip("/") + "/"
     try:
         async with httpx.AsyncClient(timeout=3.0, follow_redirects=True) as client:
-            await client.get(url)
+            await client.get(url, **_ollama_request_kwargs())
             return True
     except Exception:
         return False
@@ -461,7 +469,10 @@ async def get_models(
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(f"{target_base_url.rstrip('/')}/api/tags")
+            response = await client.get(
+                f"{target_base_url.rstrip('/')}/api/tags",
+                **_ollama_request_kwargs(),
+            )
             response.raise_for_status()
             payload = response.json()
     except Exception as exc:
@@ -515,6 +526,7 @@ async def pull_model(request: ModelPullRequest) -> ModelPullResponse:
             response = await client.post(
                 f"{target_base_url.rstrip('/')}/api/pull",
                 json={"name": model_name, "stream": False},
+                **_ollama_request_kwargs(),
             )
             response.raise_for_status()
             payload = response.json()

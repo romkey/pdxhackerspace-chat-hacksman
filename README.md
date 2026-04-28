@@ -45,6 +45,8 @@ See `.env.example`. Key vars:
 - `GET /api/occurrences` returns stored occurrences from the feed.
 - `DEFAULT_PROVIDER` (`ollama` or `llama_cpp`).
 - `DEFAULT_LLM_BASE_URL`, `DEFAULT_MODEL`, `DEFAULT_SYSTEM_PROMPT`.
+- `OLLAMA_API_KEY` to send an optional bearer token to Ollama chat, model, pull, and
+  embedding endpoints.
 - `BASIC_AUTH_USERNAME` and `BASIC_AUTH_PASSWORD` to enable optional HTTP basic auth.
 - `SENTRY_DSN` to enable Sentry error reporting.
 - `EMBEDDING_TIMEOUT_SECONDS` for embedding calls used by RAG lookup.

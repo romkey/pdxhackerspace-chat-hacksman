@@ -94,6 +94,12 @@ def _extract_chunk_text(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _bearer_auth_headers(api_key: str | None) -> dict[str, str] | None:
+    if not api_key:
+        return None
+    return {"Authorization": f"Bearer {api_key}"}
+
+
 @dataclass(slots=True)
 class RagService:
     qdrant_url: str
@@ -108,6 +114,7 @@ class RagService:
     embedding_context_length: int = 8192
     embedding_timeout_seconds: float = 30.0
     min_score: float = 0.0
+    ollama_api_key: str | None = None
     _collection_vector_dims: dict[str, int | None] = field(default_factory=dict)
     _client: QdrantClient | None = None
 
@@ -121,9 +128,14 @@ class RagService:
 
     async def _embed_query_modern(self, query: str) -> list[float] | None:
         async with httpx.AsyncClient(timeout=self.embedding_timeout_seconds) as client:
+            kwargs: dict[str, Any] = {}
+            headers = _bearer_auth_headers(self.ollama_api_key)
+            if headers:
+                kwargs["headers"] = headers
             response = await client.post(
                 f"{self.embedding_url.rstrip('/')}/api/embed",
                 json={"model": self.embedding_model, "input": [query]},
+                **kwargs,
             )
             response.raise_for_status()
             data = response.json()
@@ -135,9 +147,14 @@ class RagService:
 
     async def _embed_query_legacy(self, query: str) -> list[float] | None:
         async with httpx.AsyncClient(timeout=self.embedding_timeout_seconds) as client:
+            kwargs: dict[str, Any] = {}
+            headers = _bearer_auth_headers(self.ollama_api_key)
+            if headers:
+                kwargs["headers"] = headers
             response = await client.post(
                 f"{self.embedding_url.rstrip('/')}/api/embeddings",
                 json={"model": self.embedding_model, "prompt": query},
+                **kwargs,
             )
             response.raise_for_status()
             data = response.json()

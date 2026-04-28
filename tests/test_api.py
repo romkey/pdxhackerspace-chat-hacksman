@@ -457,6 +457,39 @@ def test_models_endpoint_returns_ollama_model_list(monkeypatch) -> None:
         assert "llama3.2:latest" in body["models"]
 
 
+def test_models_endpoint_sends_ollama_api_key(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"models": []}
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        async def get(self, url, headers):
+            del url
+            captured.update(headers)
+            return FakeResponse()
+
+    monkeypatch.setattr(main_module.config, "ollama_api_key", "ollama-secret")
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", lambda timeout: FakeAsyncClient())
+
+    with TestClient(app) as client:
+        response = client.get("/api/models?provider=ollama&base_url=http://localhost:11434")
+        assert response.status_code == 200
+
+    assert captured["Authorization"] == "Bearer ollama-secret"
+
+
 def test_meta_endpoint() -> None:
     with TestClient(app) as client:
         response = client.get("/api/meta")
@@ -504,3 +537,43 @@ def test_pull_model_endpoint(monkeypatch) -> None:
         body = response.json()
         assert body["provider"] == "ollama"
         assert body["pulled_model"] == "llama3.2:latest"
+
+
+def test_pull_model_endpoint_sends_ollama_api_key(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"status": "success"}
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        async def post(self, url, json, headers):
+            del url, json
+            captured.update(headers)
+            return FakeResponse()
+
+    monkeypatch.setattr(main_module.config, "ollama_api_key", "ollama-secret")
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", lambda timeout: FakeAsyncClient())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/models/pull",
+            json={
+                "provider": "ollama",
+                "base_url": "http://localhost:11434",
+                "name": "llama3.2:latest",
+            },
+        )
+        assert response.status_code == 200
+
+    assert captured["Authorization"] == "Bearer ollama-secret"

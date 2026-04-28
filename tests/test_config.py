@@ -45,3 +45,9 @@ def test_load_config_reads_sentry_dsn(monkeypatch) -> None:
     monkeypatch.setenv("SENTRY_DSN", "https://public@example.ingest.sentry.io/1")
     config = load_config()
     assert config.sentry_dsn == "https://public@example.ingest.sentry.io/1"
+
+
+def test_load_config_reads_ollama_api_key(monkeypatch) -> None:
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-secret")
+    config = load_config()
+    assert config.ollama_api_key == "ollama-secret"

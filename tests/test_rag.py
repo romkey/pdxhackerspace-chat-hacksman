@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import app.rag as rag_module
 from app.rag import RagService, _extract_chunk_text
 
 
@@ -138,6 +139,42 @@ def test_embed_query_uses_modern_embed_endpoint_first(monkeypatch) -> None:
 
     vector = asyncio.run(service._embed_query("hello"))
     assert vector == [0.5, 0.6]
+
+
+def test_modern_embed_sends_configured_ollama_api_key(monkeypatch) -> None:
+    service = _service()
+    service.ollama_api_key = "ollama-secret"
+    captured: dict[str, str] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"embeddings": [[0.5, 0.6]]}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            del timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        async def post(self, url, json, headers):
+            del url, json
+            captured.update(headers)
+            return FakeResponse()
+
+    monkeypatch.setattr(rag_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    vector = asyncio.run(service._embed_query_modern("hello"))
+
+    assert vector == [0.5, 0.6]
+    assert captured["Authorization"] == "Bearer ollama-secret"
 
 
 def test_embed_query_falls_back_to_legacy_endpoint(monkeypatch) -> None:

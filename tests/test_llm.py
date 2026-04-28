@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from app.llm import _build_system_prompt
-from app.models import ContextChunk
+import asyncio
+
+import app.llm as llm_module
+from app.llm import LlmService, _build_system_prompt
+from app.models import AppSettings, ContextChunk
 
 
 def test_build_system_prompt_enriches_calibre_chunk_metadata() -> None:
@@ -179,3 +182,48 @@ def test_build_system_prompt_adds_events_guidance_when_present() -> None:
         ],
     )
     assert "For events context: always mention the date and time" in prompt
+
+
+def test_ollama_chat_sends_configured_api_key(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        text = ""
+
+        def json(self):
+            return {"message": {"content": "ok"}, "prompt_eval_count": 1, "eval_count": 1}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            del timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        async def post(self, url, json, headers):
+            del url, json
+            captured.update(headers)
+            return FakeResponse()
+
+    monkeypatch.setattr(llm_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    service = LlmService(ollama_api_key="ollama-secret")
+    settings = AppSettings(
+        provider="ollama",
+        llm_base_url="http://localhost:11434",
+        model="llama3.2:latest",
+        system_prompt="Base prompt",
+    )
+
+    answer, _metrics = asyncio.run(
+        service._chat_ollama(settings=settings, question="hello", context=[])
+    )
+
+    assert answer == "ok"
+    assert captured["Authorization"] == "Bearer ollama-secret"

@@ -30,6 +30,7 @@ class AppConfig:
     llm_timeout_seconds: float
     llm_retry_attempts: int
     llm_retry_backoff_seconds: float
+    ollama_api_key: str | None
     default_provider: str
     default_llm_base_url: str
     default_model: str
@@ -78,6 +79,7 @@ def load_config() -> AppConfig:
         llm_timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "180")),
         llm_retry_attempts=int(os.getenv("LLM_RETRY_ATTEMPTS", "2")),
         llm_retry_backoff_seconds=float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "0.5")),
+        ollama_api_key=os.getenv("OLLAMA_API_KEY") or None,
         default_provider=os.getenv("DEFAULT_PROVIDER", "ollama"),
         default_llm_base_url=os.getenv("DEFAULT_LLM_BASE_URL", "http://localhost:11434"),
         default_model=os.getenv("DEFAULT_MODEL", "llama3.2:latest"),

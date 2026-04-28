@@ -250,19 +250,35 @@ def _ns_to_ms(value: Any) -> float | None:
     return None
 
 
+def _bearer_auth_headers(api_key: str | None) -> dict[str, str] | None:
+    if not api_key:
+        return None
+    return {"Authorization": f"Bearer {api_key}"}
+
+
 @dataclass(slots=True)
 class LlmService:
     request_timeout_seconds: float = 180.0
     retry_attempts: int = 2
     retry_backoff_seconds: float = 0.5
+    ollama_api_key: str | None = None
 
-    async def _post_json_with_retries(self, *, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _post_json_with_retries(
+        self,
+        *,
+        url: str,
+        payload: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         last_exc: httpx.HTTPError | None = None
         max_attempts = max(1, self.retry_attempts)
         for attempt in range(1, max_attempts + 1):
             try:
                 async with httpx.AsyncClient(timeout=self.request_timeout_seconds) as client:
-                    response = await client.post(url, json=payload)
+                    kwargs: dict[str, Any] = {}
+                    if headers:
+                        kwargs["headers"] = headers
+                    response = await client.post(url, json=payload, **kwargs)
                 if response.status_code >= 400:
                     msg = f"LLM request failed ({response.status_code}): {response.text}"
                     raise LlmError(msg)
@@ -357,7 +373,11 @@ class LlmService:
                 "seed": settings.tweaks.seed,
             },
         }
-        data = await self._post_json_with_retries(url=url, payload=payload)
+        data = await self._post_json_with_retries(
+            url=url,
+            payload=payload,
+            headers=_bearer_auth_headers(self.ollama_api_key),
+        )
         content = data.get("message", {}).get("content")
         if not isinstance(content, str):
             raise LlmError("Ollama returned an unexpected payload.")
