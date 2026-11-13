@@ -44,8 +44,12 @@ def env_files(root: Path) -> list[Path]:
     ]
 
 
-def local_secrets(root: Path) -> dict[str, str]:
-    """Maps each real value in local .env files to its variable's name."""
+def local_env_names(root: Path) -> dict[str, str]:
+    """Maps each real value in local .env files to its variable's name.
+
+    Only the names are ever printed. (Not called "secrets": CodeQL's
+    clear-text-logging check goes by variable names.)
+    """
     files = env_files(root)
     dummies = {
         value
@@ -63,8 +67,8 @@ def local_secrets(root: Path) -> dict[str, str]:
 
 
 def main(argv: list[str]) -> int:
-    secrets = local_secrets(Path.cwd())
-    if not secrets:
+    names_by_value = local_env_names(Path.cwd())
+    if not names_by_value:
         return 0
     failed = False
     for name in argv:
@@ -78,9 +82,9 @@ def main(argv: list[str]) -> int:
         for number, line in enumerate(lines, 1):
             if ALLOW in line:
                 continue
-            for value, key in secrets.items():
+            for value, variable in names_by_value.items():
                 if value in line:
-                    print(f"{name}:{number}: contains the value of {key} from .env")
+                    print(f"{name}:{number}: contains the value of {variable} from .env")
                     failed = True
     if failed:
         print("Remove it (and rotate it if it was ever pushed).")

@@ -113,8 +113,7 @@ def test_llm_base_url_history_is_remembered_and_sorted(make_client: MakeClient) 
         urls_resp = client.get("/api/llm-base-urls?limit=100")
     assert urls_resp.status_code == 200
     urls = urls_resp.json()["urls"]
-    assert "http://zeta.local:11434" in urls
-    assert "http://alpha.local:11434" in urls
+    assert {"http://zeta.local:11434", "http://alpha.local:11434"} <= set(urls)
     assert urls == sorted(urls, key=lambda item: item.casefold())
 
 
