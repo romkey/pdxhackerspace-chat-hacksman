@@ -7,6 +7,8 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-13
+
 ### Changed
 
 - **Breaking:** query embeddings now come from an OpenAI-compatible
