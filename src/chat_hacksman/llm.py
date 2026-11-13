@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from time import perf_counter
 
-# Any: Ollama and llama.cpp responses are untyped JSON.
+# Any: chat completion responses are untyped JSON.
 from typing import Any
 
 import httpx
@@ -17,6 +17,8 @@ class LlmError(RuntimeError):
 @dataclass(slots=True)
 class LlmResult:
     answer: str
+    # The model actually used, after resolving defaults.
+    model: str
     input_tokens: int | None
     output_tokens: int | None
     total_tokens: int | None
@@ -240,50 +242,89 @@ def _build_system_prompt(base_prompt: str, context: list[ContextChunk]) -> str:
     return f"{base_prompt}\n\n{guidance}\n\nRetrieved context:\n{context_block}"
 
 
-def _ns_to_ms(value: Any) -> float | None:
-    if isinstance(value, (int, float)):
-        return float(value) / 1_000_000.0
+def _ms(value: Any) -> float | None:
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
     return None
 
 
-def _bearer_auth_headers(api_key: str | None) -> dict[str, str] | None:
-    if not api_key:
-        return None
-    return {"Authorization": f"Bearer {api_key}"}
+def _int_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _auth_headers(api_key: str | None) -> dict[str, str]:
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
 
 @dataclass(slots=True)
 class LlmService:
+    """Chat through an OpenAI-compatible API: POST {base_url}/chat/completions.
+
+    Works with OpenAI, llama.cpp's llama-server, vLLM, LM Studio, LiteLLM,
+    Ollama's /v1 API and the like. `default_model` is used when the saved
+    settings name no model; if it's empty too, the first model the server
+    lists at GET {base_url}/models.
+    """
+
+    base_url: str
+    api_key: str | None = None
+    default_model: str = ""
     request_timeout_seconds: float = 180.0
     retry_attempts: int = 2
     retry_backoff_seconds: float = 0.5
-    ollama_api_key: str | None = None
 
-    async def _post_json_with_retries(
-        self,
-        *,
-        url: str,
-        payload: dict[str, Any],
-        headers: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
+    def _url(self, path: str) -> str:
+        return f"{self.base_url.rstrip('/')}/{path}"
+
+    async def list_models(self) -> list[str]:
+        """Model ids from GET {base_url}/models, sorted. Raises LlmError."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    self._url("models"), headers=_auth_headers(self.api_key)
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise LlmError(f"Listing models failed: {type(exc).__name__}: {exc}") from exc
+        items = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            raise LlmError("Unexpected /models response: no data list.")
+        names = [
+            item["id"].strip()
+            for item in items
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip()
+        ]
+        return sorted(dict.fromkeys(names), key=str.casefold)
+
+    async def resolve_model(self, model: str) -> str:
+        """The model to send: the saved one, else LLM_MODEL, else the server's first."""
+        chosen = model.strip() or self.default_model.strip()
+        if chosen:
+            return chosen
+        models = await self.list_models()
+        if not models:
+            raise LlmError("The LLM server lists no models; set LLM_MODEL.")
+        return models[0]
+
+    async def _post_json_with_retries(self, *, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         last_exc: httpx.HTTPError | None = None
         max_attempts = max(1, self.retry_attempts)
         for attempt in range(1, max_attempts + 1):
             try:
                 async with httpx.AsyncClient(timeout=self.request_timeout_seconds) as client:
-                    kwargs: dict[str, Any] = {}
-                    if headers:
-                        kwargs["headers"] = headers
-                    response = await client.post(url, json=payload, **kwargs)
+                    response = await client.post(
+                        url, json=payload, headers=_auth_headers(self.api_key)
+                    )
                 if response.status_code >= 400:
                     msg = f"LLM request failed ({response.status_code}): {response.text}"
                     raise LlmError(msg)
                 try:
                     data = response.json()
                 except ValueError as exc:
-                    raise LlmError(f"LLM provider returned invalid JSON: {exc}") from exc
+                    raise LlmError(f"LLM server returned invalid JSON: {exc}") from exc
                 if not isinstance(data, dict):
-                    raise LlmError("LLM provider returned a non-object JSON payload.")
+                    raise LlmError("LLM server returned a non-object JSON payload.")
                 return data
             except LlmError:
                 raise
@@ -309,137 +350,68 @@ class LlmService:
         context: list[ContextChunk],
     ) -> LlmResult:
         started = perf_counter()
-        provider = settings.provider
-        if provider == "ollama":
-            answer, provider_metrics = await self._chat_ollama(
-                settings=settings, question=question, context=context
-            )
-        elif provider == "llama_cpp":
-            answer, provider_metrics = await self._chat_llama_cpp(
-                settings=settings, question=question, context=context
-            )
-        else:
-            msg = f"Unsupported provider '{provider}'"
-            raise LlmError(msg)
+        model = await self.resolve_model(settings.model)
+        tweaks = settings.tweaks
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": _build_system_prompt(settings.system_prompt, context),
+                },
+                {"role": "user", "content": question},
+            ],
+            "temperature": tweaks.temperature,
+            "top_p": tweaks.top_p,
+            "max_tokens": tweaks.max_tokens,
+            "stream": False,
+        }
+        if tweaks.seed is not None:
+            payload["seed"] = tweaks.seed
+        data = await self._post_json_with_retries(
+            url=self._url("chat/completions"), payload=payload
+        )
 
+        choices = data.get("choices")
+        first = choices[0] if isinstance(choices, list) and choices else None
+        message = first.get("message") if isinstance(first, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, str) or not isinstance(first, dict):
+            raise LlmError("LLM server returned an unexpected chat completion payload.")
         llm_latency_ms = (perf_counter() - started) * 1000.0
-        input_tokens = provider_metrics.get("prompt_tokens")
-        output_tokens = provider_metrics.get("completion_tokens")
-        total_tokens = provider_metrics.get("total_tokens")
+
+        raw_usage = data.get("usage")
+        usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
+        input_tokens = _int_or_none(usage.get("prompt_tokens"))
+        output_tokens = _int_or_none(usage.get("completion_tokens"))
+        total_tokens = _int_or_none(usage.get("total_tokens"))
+        # llama-server adds generation timings; other servers don't.
+        raw_timings = data.get("timings")
+        timings: dict[str, Any] = raw_timings if isinstance(raw_timings, dict) else {}
+        eval_ms = _ms(timings.get("predicted_ms"))
+        provider_metrics: dict[str, Any] = {
+            "model": data.get("model") if isinstance(data.get("model"), str) else model,
+            "finish_reason": first.get("finish_reason"),
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "prompt_eval_duration_ms": _ms(timings.get("prompt_ms")),
+            "eval_duration_ms": eval_ms,
+        }
 
         tokens_per_second = None
-        if isinstance(output_tokens, int) and output_tokens > 0:
-            eval_ms = provider_metrics.get("eval_duration_ms")
-            if isinstance(eval_ms, (int, float)) and float(eval_ms) > 0:
-                tokens_per_second = output_tokens / (float(eval_ms) / 1000.0)
-            elif llm_latency_ms > 0:
-                tokens_per_second = output_tokens / (llm_latency_ms / 1000.0)
+        if output_tokens:
+            seconds = (eval_ms if eval_ms else llm_latency_ms) / 1000.0
+            if seconds > 0:
+                tokens_per_second = output_tokens / seconds
 
         return LlmResult(
-            answer=answer,
-            input_tokens=input_tokens if isinstance(input_tokens, int) else None,
-            output_tokens=output_tokens if isinstance(output_tokens, int) else None,
-            total_tokens=total_tokens if isinstance(total_tokens, int) else None,
+            answer=content,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
             llm_latency_ms=llm_latency_ms,
             tokens_per_second=tokens_per_second,
             provider_metrics=provider_metrics,
         )
-
-    async def _chat_ollama(
-        self,
-        *,
-        settings: AppSettings,
-        question: str,
-        context: list[ContextChunk],
-    ) -> tuple[str, dict[str, Any]]:
-        url = f"{settings.llm_base_url.rstrip('/')}/api/chat"
-        system_prompt = _build_system_prompt(settings.system_prompt, context)
-        payload = {
-            "model": settings.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question},
-            ],
-            "stream": False,
-            "options": {
-                "temperature": settings.tweaks.temperature,
-                "top_p": settings.tweaks.top_p,
-                "num_ctx": settings.tweaks.num_ctx,
-                "repeat_penalty": settings.tweaks.repeat_penalty,
-                "seed": settings.tweaks.seed,
-            },
-        }
-        data = await self._post_json_with_retries(
-            url=url,
-            payload=payload,
-            headers=_bearer_auth_headers(self.ollama_api_key),
-        )
-        content = data.get("message", {}).get("content")
-        if not isinstance(content, str):
-            raise LlmError("Ollama returned an unexpected payload.")
-
-        prompt_eval_count = data.get("prompt_eval_count")
-        eval_count = data.get("eval_count")
-        total_duration_ms = _ns_to_ms(data.get("total_duration"))
-        prompt_eval_duration_ms = _ns_to_ms(data.get("prompt_eval_duration"))
-        eval_duration_ms = _ns_to_ms(data.get("eval_duration"))
-        provider_metrics: dict[str, Any] = {
-            "provider": "ollama",
-            "prompt_tokens": int(prompt_eval_count) if isinstance(prompt_eval_count, int) else None,
-            "completion_tokens": int(eval_count) if isinstance(eval_count, int) else None,
-            "total_tokens": (
-                int(prompt_eval_count) + int(eval_count)
-                if isinstance(prompt_eval_count, int) and isinstance(eval_count, int)
-                else None
-            ),
-            "total_duration_ms": total_duration_ms,
-            "prompt_eval_duration_ms": prompt_eval_duration_ms,
-            "eval_duration_ms": eval_duration_ms,
-            "load_duration_ms": _ns_to_ms(data.get("load_duration")),
-        }
-        return content, provider_metrics
-
-    async def _chat_llama_cpp(
-        self,
-        *,
-        settings: AppSettings,
-        question: str,
-        context: list[ContextChunk],
-    ) -> tuple[str, dict[str, Any]]:
-        url = f"{settings.llm_base_url.rstrip('/')}/v1/chat/completions"
-        system_prompt = _build_system_prompt(settings.system_prompt, context)
-        payload = {
-            "model": settings.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question},
-            ],
-            "temperature": settings.tweaks.temperature,
-            "top_p": settings.tweaks.top_p,
-            "max_tokens": settings.tweaks.max_tokens,
-            "repeat_penalty": settings.tweaks.repeat_penalty,
-            "seed": settings.tweaks.seed,
-        }
-        data = await self._post_json_with_retries(url=url, payload=payload)
-
-        choices = data.get("choices", [])
-        if not isinstance(choices, list) or not choices:
-            raise LlmError("llama.cpp returned an unexpected payload.")
-        content = choices[0].get("message", {}).get("content")
-        if not isinstance(content, str):
-            raise LlmError("llama.cpp returned an unexpected message payload.")
-
-        usage = data.get("usage", {}) if isinstance(data.get("usage"), dict) else {}
-        prompt_tokens = usage.get("prompt_tokens")
-        completion_tokens = usage.get("completion_tokens")
-        total_tokens = usage.get("total_tokens")
-        provider_metrics = {
-            "provider": "llama_cpp",
-            "prompt_tokens": int(prompt_tokens) if isinstance(prompt_tokens, int) else None,
-            "completion_tokens": (
-                int(completion_tokens) if isinstance(completion_tokens, int) else None
-            ),
-            "total_tokens": int(total_tokens) if isinstance(total_tokens, int) else None,
-            "finish_reason": choices[0].get("finish_reason"),
-        }
-        return content, provider_metrics

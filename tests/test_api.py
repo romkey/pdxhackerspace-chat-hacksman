@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import json
 from collections.abc import Callable
 
 # Any: request bodies are JSON.
@@ -20,32 +19,24 @@ from tests.conftest import Handler, MakeClient
 MockHttp = Callable[[Handler], None]
 
 
-def settings_payload(llm_base_url: str, system_prompt: str) -> dict[str, Any]:
+def settings_payload(system_prompt: str, model: str = "") -> dict[str, Any]:
     return {
-        "provider": "ollama",
-        "llm_base_url": llm_base_url,
-        "model": "llama3.2:latest",
+        "model": model,
         "system_prompt": system_prompt,
-        "tweaks": {
-            "max_tokens": 512,
-            "temperature": 0.1,
-            "top_p": 0.9,
-            "num_ctx": 4096,
-            "repeat_penalty": 1.1,
-            "seed": None,
-        },
+        "tweaks": {"max_tokens": 512, "temperature": 0.1, "top_p": 0.9, "seed": None},
     }
 
 
 def llm_result(answer: str = "ok") -> LlmResult:
     return LlmResult(
         answer=answer,
+        model="test-model",
         input_tokens=10,
         output_tokens=5,
         total_tokens=15,
         llm_latency_ms=120.0,
         tokens_per_second=41.6,
-        provider_metrics={"provider": "ollama"},
+        provider_metrics={"finish_reason": "stop"},
     )
 
 
@@ -85,12 +76,21 @@ def test_healthz_reports_version(make_client: MakeClient) -> None:
 def test_settings_round_trip(make_client: MakeClient) -> None:
     with make_client() as client:
         put_resp = client.put(
-            "/api/settings", json=settings_payload("http://localhost:11434", "Custom prompt")
+            "/api/settings", json=settings_payload("Custom prompt", model="qwen3")
         )
         assert put_resp.status_code == 200
         get_resp = client.get("/api/settings")
     assert get_resp.status_code == 200
     assert get_resp.json()["system_prompt"] == "Custom prompt"
+    assert get_resp.json()["model"] == "qwen3"
+
+
+def test_settings_ignore_old_provider_fields(make_client: MakeClient) -> None:
+    payload = settings_payload("p") | {"provider": "ollama", "llm_base_url": "http://x:11434"}
+    with make_client() as client:
+        saved = client.put("/api/settings", json=payload).json()
+    assert "provider" not in saved
+    assert "llm_base_url" not in saved
 
 
 def test_settings_default_to_configured_collections(make_client: MakeClient) -> None:
@@ -100,69 +100,48 @@ def test_settings_default_to_configured_collections(make_client: MakeClient) -> 
             "available_collections": ["docs", "events"],
             "enabled_collections": ["docs", "events"],
         }
-        payload = settings_payload("http://localhost:11434", "p")
+        payload = settings_payload("p")
         payload["enabled_rag_collections"] = ["events", "unknown"]
         saved = client.put("/api/settings", json=payload).json()
     assert saved["enabled_rag_collections"] == ["events"]
 
 
-def test_llm_base_url_history_is_remembered_and_sorted(make_client: MakeClient) -> None:
-    with make_client() as client:
-        for url in ("http://zeta.local:11434", "http://alpha.local:11434"):
-            assert client.put("/api/settings", json=settings_payload(url, "p")).status_code == 200
-        urls_resp = client.get("/api/llm-base-urls?limit=100")
-    assert urls_resp.status_code == 200
-    urls = urls_resp.json()["urls"]
-    assert {"http://zeta.local:11434", "http://alpha.local:11434"} <= set(urls)
-    assert urls == sorted(urls, key=lambda item: item.casefold())
-
-
-def test_llm_base_url_status_reports_transition_times(
+def test_llm_status_reports_transition_times(
     make_client: MakeClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    outcomes = {
-        "http://alpha.local:11434": [True, False],
-        "http://zeta.local:11434": [True, True],
-        "http://localhost:11434": [True, True],
-    }
+    outcomes = [True, True, False]
+    seen: list[tuple[str, str | None]] = []
 
     async def fake_check(url: str, api_key: str | None) -> bool:
-        values = outcomes[url]
-        return values.pop(0) if values else True
+        seen.append((url, api_key))
+        return outcomes.pop(0)
 
-    monkeypatch.setattr(server_module, "_check_provider_availability", fake_check)
-    monkeypatch.setattr(server_module, "_resolve_provider_ip", lambda url: "127.0.0.1")
+    monkeypatch.setattr(server_module, "_check_llm_availability", fake_check)
+    monkeypatch.setattr(server_module, "_resolve_host_ip", lambda url: "127.0.0.1")
 
-    with make_client() as client:
-        for url in ("http://zeta.local:11434", "http://alpha.local:11434"):
-            assert client.put("/api/settings", json=settings_payload(url, "p")).status_code == 200
-
-        first = client.get("/api/llm-base-urls/status?limit=100")
-        assert first.status_code == 200
-        first_items = {item["url"]: item for item in first.json()["items"]}
-        assert first_items["http://alpha.local:11434"]["available"] is True
-        assert first_items["http://zeta.local:11434"]["available"] is True
-        alpha_changed_first = first_items["http://alpha.local:11434"]["last_changed_at"]
-
-        second = client.get("/api/llm-base-urls/status?limit=100")
-    assert second.status_code == 200
-    second_items = {item["url"]: item for item in second.json()["items"]}
-    assert second_items["http://alpha.local:11434"]["available"] is False
-    assert second_items["http://alpha.local:11434"]["last_changed_at"] != alpha_changed_first
-    assert second_items["http://zeta.local:11434"]["available"] is True
+    with make_client(llm_url="http://llm.local/v1", llm_api_key="key") as client:
+        first = client.get("/api/llm/status").json()
+        second = client.get("/api/llm/status").json()
+        third = client.get("/api/llm/status").json()
+    assert seen[0] == ("http://llm.local/v1", "key")
+    assert first["url"] == "http://llm.local/v1"
+    assert (first["available"], second["available"], third["available"]) == (True, True, False)
+    assert second["last_changed_at"] == first["last_changed_at"]
+    assert third["last_changed_at"] != first["last_changed_at"]
 
 
-def test_check_provider_availability(mock_http: MockHttp) -> None:
+def test_check_llm_availability(mock_http: MockHttp) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "down.local":
             raise httpx.ConnectError("refused", request=request)
+        assert request.url.path == "/v1/models"
         assert request.headers["Authorization"] == "Bearer key"
-        return httpx.Response(200)
+        return httpx.Response(401)
 
     mock_http(handler)
-    check = server_module._check_provider_availability
-    assert asyncio.run(check("http://up.local:11434", "key")) is True
-    assert asyncio.run(check("http://down.local:11434", "key")) is False
+    check = server_module._check_llm_availability
+    assert asyncio.run(check("http://up.local/v1", "key")) is True
+    assert asyncio.run(check("http://down.local/v1", "key")) is False
 
 
 def test_chat_endpoint_records_history(
@@ -325,8 +304,8 @@ def test_feedback_endpoint_records_and_returns_feedback(
                 "history_id": history_id,
                 "question": "ping",
                 "answer": "ok",
-                "provider": "ollama",
-                "model": "llama3.2:latest",
+                "provider": "openai",
+                "model": "test-model",
             },
         )
         assert feedback_resp.status_code == 200
@@ -336,42 +315,36 @@ def test_feedback_endpoint_records_and_returns_feedback(
     assert rows[0]["text"] == "helpful response"
 
 
-def test_models_endpoint_returns_ollama_model_list_with_api_key(
-    make_client: MakeClient, mock_http: MockHttp
-) -> None:
+def test_models_endpoint_lists_server_models(make_client: MakeClient, mock_http: MockHttp) -> None:
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         return httpx.Response(
-            200, json={"models": [{"name": "llama3.2:latest"}, {"name": "Alpha"}, {"x": 1}]}
+            200,
+            json={"object": "list", "data": [{"id": "zeta"}, {"id": "Alpha"}, {"x": 1}]},
         )
 
     mock_http(handler)
-    with make_client(ollama_api_key="ollama-secret") as client:
-        response = client.get("/api/models?provider=ollama&base_url=http://localhost:11434")
-    assert response.json() == {
-        "provider": "ollama",
-        "models": ["Alpha", "llama3.2:latest"],
-        "error": None,
-    }
-    assert seen[0].url.path == "/api/tags"
-    assert seen[0].headers["Authorization"] == "Bearer ollama-secret"
+    with make_client(
+        llm_url="http://llm.local/v1", llm_api_key="llm-secret", llm_model="zeta"
+    ) as client:
+        response = client.get("/api/models")
+    assert response.json() == {"default_model": "zeta", "models": ["Alpha", "zeta"], "error": None}
+    assert str(seen[0].url) == "http://llm.local/v1/models"
+    assert seen[0].headers["Authorization"] == "Bearer llm-secret"
 
 
 def test_models_endpoint_reports_errors(make_client: MakeClient, mock_http: MockHttp) -> None:
     mock_http(lambda request: httpx.Response(500))
     with make_client() as client:
-        failed = client.get("/api/models?provider=ollama").json()
+        failed = client.get("/api/models").json()
         assert failed["models"] == []
         assert "500" in failed["error"]
 
         mock_http(lambda request: httpx.Response(200, json={"models": "nope"}))
-        odd = client.get("/api/models?provider=ollama").json()
-        assert odd["error"] == "Unexpected tags response format."
-
-        llama = client.get("/api/models?provider=llama_cpp").json()
-    assert llama == {"provider": "llama_cpp", "models": [], "error": None}
+        odd = client.get("/api/models").json()
+    assert "no data list" in odd["error"]
 
 
 def test_meta_endpoint(make_client: MakeClient) -> None:
@@ -382,44 +355,6 @@ def test_meta_endpoint(make_client: MakeClient) -> None:
         "version": __version__,
         "repo_url": "https://example.com/repo",
     }
-
-
-def test_pull_model_endpoint(make_client: MakeClient, mock_http: MockHttp) -> None:
-    seen: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return httpx.Response(200, json={"status": "success"})
-
-    mock_http(handler)
-    with make_client(ollama_api_key="ollama-secret") as client:
-        response = client.post(
-            "/api/models/pull",
-            json={
-                "provider": "ollama",
-                "base_url": "http://localhost:11434",
-                "name": "llama3.2:latest",
-            },
-        )
-    assert response.json() == {
-        "provider": "ollama",
-        "pulled_model": "llama3.2:latest",
-        "status": "success",
-    }
-    assert seen[0].url.path == "/api/pull"
-    assert json.loads(seen[0].content) == {"name": "llama3.2:latest", "stream": False}
-    assert seen[0].headers["Authorization"] == "Bearer ollama-secret"
-
-
-def test_pull_model_endpoint_errors(make_client: MakeClient, mock_http: MockHttp) -> None:
-    mock_http(lambda request: httpx.Response(500))
-    with make_client() as client:
-        pull = {"provider": "ollama", "name": "llama3.2:latest"}
-        assert client.post("/api/models/pull", json=pull).status_code == 502
-        blank = {"provider": "ollama", "name": "  "}
-        assert client.post("/api/models/pull", json=blank).status_code == 400
-        llama = {"provider": "llama_cpp", "name": "x"}
-        assert client.post("/api/models/pull", json=llama).status_code == 400
 
 
 def test_topics_endpoint_stores_feed_records(make_client: MakeClient, mock_http: MockHttp) -> None:

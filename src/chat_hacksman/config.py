@@ -12,7 +12,15 @@ from pathlib import Path
 
 from chat_hacksman.rerank import RERANK_APIS, RerankApi
 
-PROVIDERS = ("ollama", "llama_cpp")
+# Variables from before the chat API became OpenAI-compatible, and what
+# replaced them. Setting one stops the app, so a stale .env can't silently
+# point the chat at the wrong server.
+REMOVED_VARIABLES: dict[str, str] = {
+    "DEFAULT_PROVIDER": "LLM_URL (any OpenAI-compatible server)",
+    "DEFAULT_LLM_BASE_URL": "LLM_URL, which includes /v1",
+    "DEFAULT_MODEL": "LLM_MODEL",
+    "OLLAMA_API_KEY": "LLM_API_KEY",
+}
 
 DEFAULT_EMBEDDING_MODEL = "nomic-ai/modernbert-embed-base"
 DEFAULT_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
@@ -48,7 +56,7 @@ class ConfigError(ValueError):
 def known_query_prefix(model: str) -> str:
     """The query prefix for a model in KNOWN_QUERY_PREFIXES, or "" if unknown."""
     name = model.strip().lower()
-    # Ollama-style tags (":latest") and GGUF-style suffixes don't change the prefix.
+    # Tags such as ":latest" and GGUF-style suffixes don't change the prefix.
     name = name.split(":", 1)[0]
     if name in KNOWN_QUERY_PREFIXES:
         return KNOWN_QUERY_PREFIXES[name]
@@ -169,10 +177,10 @@ class Settings:
     llm_timeout_seconds: float = 180.0
     llm_retry_attempts: int = 2
     llm_retry_backoff_seconds: float = 0.5
-    ollama_api_key: str | None = None
-    default_provider: str = "ollama"
-    default_llm_base_url: str = "http://localhost:11434"
-    default_model: str = "llama3.2:latest"
+    llm_url: str = "http://localhost:8080/v1"
+    llm_api_key: str | None = None
+    # Empty: the first model the server lists.
+    llm_model: str = ""
     default_system_prompt: str = (
         "You are Chat Hacksman, an expert assistant for hackerspace members."
     )
@@ -194,11 +202,9 @@ class Settings:
         if log_level not in logging.getLevelNamesMapping():
             raise ConfigError(f"LOG_LEVEL {log_level!r} is not a logging level")
 
-        provider = env.get("DEFAULT_PROVIDER", "").strip() or cls.default_provider
-        if provider not in PROVIDERS:
-            raise ConfigError(
-                f"DEFAULT_PROVIDER must be one of {', '.join(PROVIDERS)}, not {provider!r}"
-            )
+        for name, replacement in REMOVED_VARIABLES.items():
+            if env.get(name, "").strip():
+                raise ConfigError(f"{name} is no longer used; set {replacement} instead")
 
         collections = _split_collections(env.get("RAG_COLLECTIONS", ""))
         for value in (
@@ -266,10 +272,9 @@ class Settings:
             llm_retry_backoff_seconds=_float(
                 env, "LLM_RETRY_BACKOFF_SECONDS", cls.llm_retry_backoff_seconds
             ),
-            ollama_api_key=_optional(env, "OLLAMA_API_KEY"),
-            default_provider=provider,
-            default_llm_base_url=_url(env, "DEFAULT_LLM_BASE_URL", cls.default_llm_base_url),
-            default_model=env.get("DEFAULT_MODEL", "").strip() or cls.default_model,
+            llm_url=_url(env, "LLM_URL", cls.llm_url),
+            llm_api_key=_optional(env, "LLM_API_KEY"),
+            llm_model=env.get("LLM_MODEL", "").strip(),
             default_system_prompt=(
                 env.get("DEFAULT_SYSTEM_PROMPT", "").strip() or cls.default_system_prompt
             ),

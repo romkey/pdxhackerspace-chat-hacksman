@@ -7,6 +7,31 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** The chat LLM is any OpenAI-compatible chat completions API
+  (`POST {LLM_URL}/chat/completions`): OpenAI, llama.cpp's `llama-server`,
+  vLLM, LM Studio, LiteLLM... The Ollama-native API and the
+  Ollama/llama.cpp provider choice are gone.
+- **Breaking:** The server comes from the environment only: `LLM_URL`
+  (default `http://localhost:8080/v1`), `LLM_API_KEY` and `LLM_MODEL`
+  replace `DEFAULT_PROVIDER`, `DEFAULT_LLM_BASE_URL`, `DEFAULT_MODEL` and
+  `OLLAMA_API_KEY`. The app won't start while an old variable is set,
+  naming its replacement.
+- The UI no longer asks for a provider or base URL. It shows the server
+  and whether it's up, and picks a model from `GET {LLM_URL}/models`, with
+  "Default" meaning `LLM_MODEL` (or the server's first model if unset).
+- The sampling tweaks are the standard ones: `temperature`, `top_p`,
+  `max_tokens` and an optional `seed`.
+- The database moves to schema 2: saved settings lose the provider, base
+  URL, model, `num_ctx` and `repeat_penalty`, so the model falls back to
+  `LLM_MODEL`; the list of past base URLs is dropped.
+
+### Removed
+
+- `POST /api/models/pull`, `GET /api/llm-base-urls` and
+  `GET /api/llm-base-urls/status` (replaced by `GET /api/llm/status`).
+
 ## [0.7.0] - 2026-11-13
 
 ### Added

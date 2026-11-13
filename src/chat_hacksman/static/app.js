@@ -1,20 +1,13 @@
 const el = (id) => document.getElementById(id);
 
 const fields = {
-  provider: el("provider"),
-  llmBaseUrl: el("llm-base-url"),
-  llmBaseUrlCustom: el("llm-base-url-custom"),
+  llmServer: el("llm-server"),
   modelSelect: el("model-select"),
-  modelInput: el("model-input"),
-  pullModelName: el("pull-model-name"),
-  pullModel: el("pull-model"),
   refreshModels: el("refresh-models"),
   systemPrompt: el("system-prompt"),
   temperature: el("temperature"),
   topP: el("top-p"),
   maxTokens: el("max-tokens"),
-  numCtx: el("num-ctx"),
-  repeatPenalty: el("repeat-penalty"),
   seed: el("seed"),
   status: el("status"),
   question: el("question"),
@@ -37,12 +30,10 @@ const fields = {
   ragCollections: el("rag-collections"),
   useRag: el("use-rag"),
   temporaryChat: el("temporary-chat"),
-  numCtxField: el("num-ctx-field"),
-  seedField: el("seed-field"),
 };
 let availableRagCollections = [];
 let availableModels = [];
-let rememberedLlmBaseUrls = [];
+let defaultModel = "";
 let selectedFeedbackRating = null;
 let lastResponseForFeedback = null;
 const PERFORMANCE_HISTORY_LIMIT = 20;
@@ -121,14 +112,6 @@ function setActiveTab(tabId) {
   });
 }
 
-function getEffectiveLlmBaseUrl() {
-  const custom = fields.llmBaseUrlCustom ? fields.llmBaseUrlCustom.value.trim() : "";
-  if (custom) {
-    return custom;
-  }
-  return fields.llmBaseUrl ? fields.llmBaseUrl.value.trim() : "";
-}
-
 function formatRelativeTime(isoTime) {
   const timestamp = Date.parse(isoTime || "");
   if (Number.isNaN(timestamp)) {
@@ -151,61 +134,19 @@ function formatRelativeTime(isoTime) {
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
-function populateLlmBaseUrlSelect(selectedUrl) {
-  if (!fields.llmBaseUrl) {
+async function loadLlmStatus() {
+  if (!fields.llmServer) {
     return;
   }
-  const chosen = (selectedUrl || "").trim();
-  const map = new Map();
-  rememberedLlmBaseUrls.forEach((item) => {
-    if (!item || !item.url) {
-      return;
-    }
-    map.set(item.url, item);
-  });
-  if (chosen && !map.has(chosen)) {
-    map.set(chosen, {
-      url: chosen,
-      available: null,
-      last_changed_at: null,
-      last_checked_at: null,
-    });
-  }
-  rememberedLlmBaseUrls = Array.from(map.values()).sort((a, b) =>
-    a.url.localeCompare(b.url, undefined, { sensitivity: "base" })
-  );
-
-  fields.llmBaseUrl.innerHTML = "";
-  rememberedLlmBaseUrls.forEach((item) => {
-    const option = document.createElement("option");
-    option.value = item.url;
-    const statusLabel =
-      item.available === true ? "up" : item.available === false ? "down" : "unknown";
-    const relative = item.last_changed_at ? formatRelativeTime(item.last_changed_at) : "unknown";
-    option.textContent = `${item.url} (${statusLabel}, changed ${relative})`;
-    if (item.last_changed_at) {
-      option.title = `Last changed: ${new Date(item.last_changed_at).toLocaleString()}`;
-    } else {
-      option.title = "Last changed: unknown";
-    }
-    fields.llmBaseUrl.appendChild(option);
-  });
-
-  if (chosen && rememberedLlmBaseUrls.some((item) => item.url === chosen)) {
-    fields.llmBaseUrl.value = chosen;
-  } else if (rememberedLlmBaseUrls.length > 0) {
-    fields.llmBaseUrl.value = rememberedLlmBaseUrls[0].url;
-  }
-}
-
-async function loadLlmBaseUrls(selectedUrl) {
-  const response = await fetch("/api/llm-base-urls/status?limit=500");
+  const response = await fetch("/api/llm/status");
   if (!response.ok) {
     throw new Error(await response.text());
   }
-  const data = await response.json();
-  rememberedLlmBaseUrls = Array.isArray(data.items) ? data.items : [];
-  populateLlmBaseUrlSelect(selectedUrl || getEffectiveLlmBaseUrl());
+  const item = await response.json();
+  const statusLabel = item.available ? "up" : "down";
+  const relative = formatRelativeTime(item.last_changed_at);
+  fields.llmServer.textContent = `LLM server: ${item.url} (${statusLabel}, changed ${relative})`;
+  fields.llmServer.title = `Last changed: ${new Date(item.last_changed_at).toLocaleString()}`;
 }
 
 function initHelpTips() {
@@ -289,9 +230,7 @@ async function copyDiagnostics() {
   const payload = {
     copied_at: isoNow(),
     ui_settings: {
-      provider: fields.provider.value,
-      llm_base_url: getEffectiveLlmBaseUrl(),
-      model: getCurrentModel(),
+      model: getCurrentModel() || `(default) ${defaultModel}`,
       use_rag: fields.useRag.checked,
       enabled_rag_collections: enabledRagCollections,
     },
@@ -439,8 +378,6 @@ function currentSettingsPayload() {
   diagnosticsState.rag.temporaryChat = fields.temporaryChat.checked;
   renderDiagnostics();
   return {
-    provider: fields.provider.value,
-    llm_base_url: getEffectiveLlmBaseUrl(),
     model: getCurrentModel(),
     system_prompt: fields.systemPrompt.value,
     enabled_rag_collections: enabledRagCollections,
@@ -448,132 +385,76 @@ function currentSettingsPayload() {
       temperature: Number(fields.temperature.value),
       top_p: Number(fields.topP.value),
       max_tokens: Number(fields.maxTokens.value),
-      num_ctx: Number(fields.numCtx.value),
-      repeat_penalty: Number(fields.repeatPenalty.value),
       seed: seedValue ? Number(seedValue) : null,
     },
   };
 }
 
 function getCurrentModel() {
-  if (!fields.modelInput || !fields.modelSelect || !fields.provider) {
-    return "";
-  }
-  if (fields.provider.value === "ollama") {
-    return fields.modelSelect.value.trim();
-  }
-  return fields.modelInput.value.trim();
+  // "" means the server's default (LLM_MODEL).
+  return fields.modelSelect ? fields.modelSelect.value.trim() : "";
 }
 
 function populateModelSelect(selectedModel) {
-  if (!fields.modelSelect || !fields.modelInput) {
+  if (!fields.modelSelect) {
     return;
   }
+  const chosen = (selectedModel || "").trim();
   fields.modelSelect.innerHTML = "";
-  const models = [...availableModels];
-  if (selectedModel && !models.includes(selectedModel)) {
-    models.unshift(selectedModel);
-  }
+  const defaultOption = document.createElement("option");
+  defaultOption.value = "";
+  defaultOption.textContent = defaultModel ? `Default (${defaultModel})` : "Default (server's first model)";
+  fields.modelSelect.appendChild(defaultOption);
 
+  const models = [...availableModels];
+  if (chosen && !models.includes(chosen)) {
+    models.unshift(chosen);
+  }
   models.forEach((modelName) => {
     const option = document.createElement("option");
     option.value = modelName;
     option.textContent = modelName;
     fields.modelSelect.appendChild(option);
   });
-
-  if (selectedModel && models.includes(selectedModel)) {
-    fields.modelSelect.value = selectedModel;
-  } else if (models.length > 0) {
-    fields.modelSelect.value = models[0];
-  } else {
-    fields.modelSelect.value = "";
-  }
-}
-
-function updateModelControls() {
-  if (
-    !fields.provider ||
-    !fields.modelSelect ||
-    !fields.refreshModels ||
-    !fields.modelInput ||
-    !fields.pullModelName ||
-    !fields.pullModel
-  ) {
-    return;
-  }
-  const isOllama = fields.provider.value === "ollama";
-  fields.modelSelect.hidden = !isOllama;
-  fields.refreshModels.hidden = !isOllama;
-  fields.pullModelName.hidden = !isOllama;
-  fields.pullModel.hidden = !isOllama;
-  fields.modelInput.hidden = isOllama;
+  fields.modelSelect.value = chosen;
 }
 
 async function loadAvailableModels() {
-  if (!fields.provider || !fields.llmBaseUrl) {
-    return;
-  }
-  if (fields.provider.value !== "ollama") {
-    return;
-  }
-  const baseUrl = encodeURIComponent(getEffectiveLlmBaseUrl());
-  const response = await fetch(`/api/models?provider=ollama&base_url=${baseUrl}`);
+  const response = await fetch("/api/models");
   if (!response.ok) {
     throw new Error(await response.text());
   }
   const data = await response.json();
   availableModels = data.models || [];
-  const selectedModel = getCurrentModel();
-  populateModelSelect(selectedModel);
-  updateModelControls();
+  defaultModel = data.default_model || "";
+  populateModelSelect(getCurrentModel());
   if (data.error) {
     showStatus(`Model list fetch issue: ${data.error}`);
   } else {
-    showStatus(`Loaded ${availableModels.length} Ollama models.`);
+    showStatus(`Loaded ${availableModels.length} models.`);
   }
 }
 
 function applySettings(settings) {
   if (
-    !fields.provider ||
-    !fields.llmBaseUrl ||
     !fields.systemPrompt ||
     !fields.temperature ||
     !fields.topP ||
     !fields.maxTokens ||
-    !fields.numCtx ||
-    !fields.repeatPenalty ||
     !fields.seed
   ) {
     return;
   }
-  fields.provider.value = settings.provider;
-  populateLlmBaseUrlSelect(settings.llm_base_url);
-  if (fields.llmBaseUrlCustom) {
-    fields.llmBaseUrlCustom.value = "";
-  }
-  fields.modelInput.value = settings.model;
   fields.systemPrompt.value = settings.system_prompt;
   fields.temperature.value = settings.tweaks.temperature;
   fields.topP.value = settings.tweaks.top_p;
   fields.maxTokens.value = settings.tweaks.max_tokens;
-  fields.numCtx.value = settings.tweaks.num_ctx;
-  fields.repeatPenalty.value = settings.tweaks.repeat_penalty;
   fields.seed.value = settings.tweaks.seed ?? "";
   renderRagCollectionCheckboxes(
     availableRagCollections,
     settings.enabled_rag_collections || []
   );
-  toggleProviderFields();
-  updateModelControls();
   populateModelSelect(settings.model);
-}
-
-function toggleProviderFields() {
-  const provider = fields.provider.value;
-  fields.numCtxField.style.display = provider === "ollama" ? "grid" : "none";
-  fields.seedField.style.display = provider === "llama_cpp" ? "grid" : "none";
 }
 
 async function loadSettings() {
@@ -581,51 +462,14 @@ async function loadSettings() {
   const data = await response.json();
   applySettings(data);
   try {
-    await loadLlmBaseUrls(data.llm_base_url);
+    await loadAvailableModels();
   } catch (err) {
-    showStatus(`LLM URL list unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    showStatus(`Model list unavailable: ${err instanceof Error ? err.message : String(err)}`);
   }
-  if (fields.provider.value === "ollama") {
-    try {
-      await loadAvailableModels();
-    } catch (err) {
-      showStatus(`Model list unavailable: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
+  populateModelSelect(data.model);
   diagnosticsState.rag.enabledCollections = data.enabled_rag_collections || [];
   diagnosticsState.rag.useRag = fields.useRag.checked;
   renderDiagnostics();
-}
-
-async function pullModel() {
-  if (!fields.pullModelName || !fields.llmBaseUrl) {
-    return;
-  }
-  const name = fields.pullModelName.value.trim();
-  if (!name) {
-    showStatus("Enter a model name to pull.");
-    return;
-  }
-
-  showStatus(`Pulling model ${name}...`);
-  const response = await fetch("/api/models/pull", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      provider: "ollama",
-      base_url: getEffectiveLlmBaseUrl(),
-      name,
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-  const data = await response.json();
-  await loadLlmBaseUrls(getEffectiveLlmBaseUrl());
-  await loadAvailableModels();
-  populateModelSelect(data.pulled_model);
-  fields.pullModelName.value = "";
-  showStatus(`Pulled model ${data.pulled_model}.`);
 }
 
 function renderRagCollectionCheckboxes(availableCollections, enabledCollections) {
@@ -741,7 +585,7 @@ async function loadHistory() {
     const meta = document.createElement("div");
     meta.className = "history-meta";
     const promptPart = item.prompt_id ? ` | prompt #${item.prompt_id}` : "";
-    meta.textContent = `${item.created_at} | ${item.provider}/${item.model}${promptPart}`;
+    meta.textContent = `${item.created_at} | ${item.model}${promptPart}`;
     wrapper.appendChild(meta);
 
     const qa = document.createElement("pre");
@@ -861,7 +705,7 @@ async function loadFeedback() {
     meta.className = "history-meta";
     const rating = item.rating === "up" ? "👍" : "👎";
     const linkPart = item.history_id ? ` | history_id=${item.history_id}` : "";
-    meta.textContent = `${item.created_at} | ${rating} ${item.provider}/${item.model}${linkPart}`;
+    meta.textContent = `${item.created_at} | ${rating} ${item.model}${linkPart}`;
     wrapper.appendChild(meta);
 
     const qa = document.createElement("pre");
@@ -954,8 +798,8 @@ async function askQuestion() {
       question,
       answer: data.answer,
       historyId: data.history_id ?? null,
-      provider: fields.provider ? fields.provider.value : "",
-      model: getCurrentModel(),
+      provider: "openai",
+      model: (data.metrics && data.metrics.model) || getCurrentModel(),
     };
     selectedFeedbackRating = null;
     updateFeedbackButtons();
@@ -1072,74 +916,13 @@ bindClick("refresh-feedback", async () => {
   }
 });
 
-if (fields.provider) {
-  fields.provider.addEventListener("change", toggleProviderFields);
-  fields.provider.addEventListener("change", async () => {
-    updateModelControls();
-    if (fields.provider.value === "ollama") {
-      try {
-        await loadAvailableModels();
-      } catch (err) {
-        showStatus(`Model list unavailable: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-  });
-}
-if (fields.llmBaseUrl) {
-  fields.llmBaseUrl.addEventListener("change", async () => {
-    if (fields.llmBaseUrlCustom) {
-      fields.llmBaseUrlCustom.value = "";
-    }
-    if (fields.provider && fields.provider.value === "ollama") {
-      try {
-        await loadAvailableModels();
-      } catch (err) {
-        showStatus(`Model list unavailable: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-  });
-}
-if (fields.llmBaseUrlCustom) {
-  fields.llmBaseUrlCustom.addEventListener("keydown", async (event) => {
-    if (event.key !== "Enter") {
-      return;
-    }
-    event.preventDefault();
-    const customUrl = fields.llmBaseUrlCustom.value.trim();
-    if (!customUrl) {
-      return;
-    }
-    populateLlmBaseUrlSelect(customUrl);
-    if (fields.provider && fields.provider.value === "ollama") {
-      try {
-        await loadAvailableModels();
-      } catch (err) {
-        showStatus(`Model list unavailable: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-  });
-}
-if (fields.modelSelect) {
-  fields.modelSelect.addEventListener("change", () => {
-    updateModelControls();
-  });
-}
 if (fields.refreshModels) {
   fields.refreshModels.addEventListener("click", async () => {
     try {
-      showStatus("Refreshing Ollama model list...");
+      showStatus("Refreshing model list...");
       await loadAvailableModels();
     } catch (err) {
       showStatus(`Refresh models failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  });
-}
-if (fields.pullModel) {
-  fields.pullModel.addEventListener("click", async () => {
-    try {
-      await pullModel();
-    } catch (err) {
-      showStatus(`Pull model failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
 }
@@ -1243,9 +1026,9 @@ async function bootstrap() {
   await loadMeta();
   await checkHealth();
   try {
-    await loadLlmBaseUrls();
+    await loadLlmStatus();
   } catch (err) {
-    showStatus(`LLM URL list unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    showStatus(`LLM server status unavailable: ${err instanceof Error ? err.message : String(err)}`);
   }
   await loadRagCollections();
   await loadSettings();

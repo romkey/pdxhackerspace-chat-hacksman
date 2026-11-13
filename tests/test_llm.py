@@ -1,10 +1,12 @@
 import asyncio
+import json
 from collections.abc import Callable
 
 import httpx
+import pytest
 
-from chat_hacksman.llm import LlmService, _build_system_prompt
-from chat_hacksman.models import AppSettings, ContextChunk
+from chat_hacksman.llm import LlmError, LlmService, _build_system_prompt
+from chat_hacksman.models import AppSettings, ContextChunk, SamplingTweaks
 from tests.conftest import Handler
 
 
@@ -185,28 +187,134 @@ def test_build_system_prompt_adds_events_guidance_when_present() -> None:
     assert "For events context: always mention the date and time" in prompt
 
 
-def test_ollama_chat_sends_configured_api_key(mock_http: Callable[[Handler], None]) -> None:
+def _completion(content: object = "ok", **extra: object) -> httpx.Response:
+    body: dict[str, object] = {
+        "model": "served-model",
+        "choices": [
+            {"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}
+        ],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16},
+    }
+    return httpx.Response(200, json=body | extra)
+
+
+def test_chat_uses_openai_chat_completions(mock_http: Callable[[Handler], None]) -> None:
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return httpx.Response(
-            200, json={"message": {"content": "ok"}, "prompt_eval_count": 1, "eval_count": 1}
-        )
+        return _completion(timings={"predicted_ms": 500.0, "prompt_ms": 20.0})
 
     mock_http(handler)
+    service = LlmService(base_url="http://llm.local/v1/", api_key="llm-secret", default_model="m")
+    settings = AppSettings(system_prompt="Base prompt", tweaks=SamplingTweaks(seed=7))
+    result = asyncio.run(service.chat(settings=settings, question="hello", context=[]))
 
-    service = LlmService(ollama_api_key="ollama-secret")
-    settings = AppSettings(
-        provider="ollama",
-        llm_base_url="http://localhost:11434",
-        model="llama3.2:latest",
-        system_prompt="Base prompt",
+    assert result.answer == "ok"
+    assert result.model == "m"
+    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (12, 4, 16)
+    # 4 tokens in llama-server's 500 ms of generation.
+    assert result.tokens_per_second == pytest.approx(8.0)
+    assert result.provider_metrics["model"] == "served-model"
+    assert result.provider_metrics["finish_reason"] == "stop"
+    (request,) = seen
+    assert str(request.url) == "http://llm.local/v1/chat/completions"
+    assert request.headers["Authorization"] == "Bearer llm-secret"
+    body = json.loads(request.content)
+    assert body["model"] == "m"
+    assert body["messages"] == [
+        {"role": "system", "content": "Base prompt"},
+        {"role": "user", "content": "hello"},
+    ]
+    assert (body["temperature"], body["top_p"], body["max_tokens"], body["seed"]) == (
+        0.2,
+        0.95,
+        512,
+        7,
     )
+    assert body["stream"] is False
 
-    answer, _metrics = asyncio.run(
-        service._chat_ollama(settings=settings, question="hello", context=[])
+
+def test_saved_model_wins_and_seed_is_optional(mock_http: Callable[[Handler], None]) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _completion()
+
+    mock_http(handler)
+    service = LlmService(base_url="http://llm.local/v1", default_model="env-model")
+    settings = AppSettings(model="picked", system_prompt="p")
+    result = asyncio.run(service.chat(settings=settings, question="q", context=[]))
+    body = json.loads(seen[0].content)
+    assert body["model"] == result.model == "picked"
+    assert "seed" not in body
+    assert "Authorization" not in seen[0].headers
+
+
+def test_no_model_configured_uses_the_servers_first(mock_http: Callable[[Handler], None]) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "only-model"}]})
+        return _completion()
+
+    mock_http(handler)
+    service = LlmService(base_url="http://llm.local/v1")
+    result = asyncio.run(
+        service.chat(settings=AppSettings(system_prompt="p"), question="q", context=[])
     )
+    assert result.model == "only-model"
+    assert seen == ["/v1/models", "/v1/chat/completions"]
 
-    assert answer == "ok"
-    assert seen[0].headers["Authorization"] == "Bearer ollama-secret"
+
+def test_no_model_anywhere_is_an_error(mock_http: Callable[[Handler], None]) -> None:
+    mock_http(lambda request: httpx.Response(200, json={"data": []}))
+    service = LlmService(base_url="http://llm.local/v1")
+    with pytest.raises(LlmError, match="set LLM_MODEL"):
+        asyncio.run(service.resolve_model(""))
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(400, text="bad model"),
+        httpx.Response(200, text="not json"),
+        httpx.Response(200, json=["a list"]),
+        httpx.Response(200, json={"choices": []}),
+        _completion(content=None),
+    ],
+)
+def test_bad_chat_responses_raise(
+    mock_http: Callable[[Handler], None], response: httpx.Response
+) -> None:
+    mock_http(lambda request: response)
+    service = LlmService(base_url="http://llm.local/v1", default_model="m")
+    with pytest.raises(LlmError):
+        asyncio.run(service.chat(settings=AppSettings(system_prompt="p"), question="q", context=[]))
+
+
+def test_connection_errors_are_retried(mock_http: Callable[[Handler], None]) -> None:
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise httpx.ConnectError("refused", request=request)
+        return _completion()
+
+    mock_http(handler)
+    service = LlmService(
+        base_url="http://llm.local/v1", default_model="m", retry_backoff_seconds=0.0
+    )
+    result = asyncio.run(
+        service.chat(settings=AppSettings(system_prompt="p"), question="q", context=[])
+    )
+    assert result.answer == "ok"
+    assert len(attempts) == 2
+
+    mock_http(lambda request: (_ for _ in ()).throw(httpx.ConnectError("refused", request=request)))
+    with pytest.raises(LlmError, match="after 2 attempt"):
+        asyncio.run(service.chat(settings=AppSettings(system_prompt="p"), question="q", context=[]))

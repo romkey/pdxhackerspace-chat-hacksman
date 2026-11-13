@@ -43,13 +43,12 @@ as unset.
 
 Queries are embedded with an OpenAI-compatible embeddings API
 (`POST {EMBEDDING_URL}/embeddings`, [API reference](https://platform.openai.com/docs/api-reference/embeddings/create)),
-such as OpenAI, Hugging Face TEI, Infinity, vLLM, llama.cpp's
-`llama-server` or Ollama's `/v1` API. It must be the model the collections
-were ingested with. If the server is unreachable, RAG is skipped.
+such as OpenAI, Hugging Face TEI, Infinity, vLLM or llama.cpp's
+`llama-server`. It must be the model the collections were ingested with. If the server is unreachable, RAG is skipped.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `EMBEDDING_URL` | `http://localhost:8080/v1` | Base URL including `/v1`, e.g. `https://api.openai.com/v1` or `http://localhost:11434/v1` |
+| `EMBEDDING_URL` | `http://localhost:8080/v1` | Base URL including `/v1`, e.g. `https://api.openai.com/v1` |
 | `EMBEDDING_API_KEY` | unset | Secret. Sent as `Authorization: Bearer ...` |
 | `EMBEDDING_MODEL` | `nomic-ai/modernbert-embed-base` | Model name the server knows |
 | `EMBEDDING_QUERY_PREFIX` | the model's own (below) | Put in front of every query. `none` for no prefix; `\n` is a newline; a space is added if it doesn't end in whitespace |
@@ -112,20 +111,28 @@ Reranker models:
 | `mixedbread-ai/mxbai-rerank-base-v1` | English | 512 | Apache-2.0 | Set `RERANK_CONTEXT_LENGTH=512` |
 | `jinaai/jina-reranker-v2-base-multilingual` | multilingual | 1024 | CC-BY-NC-4.0 | Non-commercial use only |
 
-## Chat models
+## Chat LLM
 
-Defaults for the settings form; what's saved in the UI wins after that.
+Answers come from an OpenAI-compatible chat completions API
+(`POST {LLM_URL}/chat/completions`, [API reference](https://platform.openai.com/docs/api-reference/chat/create)),
+such as OpenAI, llama.cpp's `llama-server`, vLLM, LM Studio or LiteLLM.
+The server is set only here; the UI can pick a model from the ones it lists
+at `GET {LLM_URL}/models`, or leave it on the default.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `DEFAULT_PROVIDER` | `ollama` | `ollama` or `llama_cpp` |
-| `DEFAULT_LLM_BASE_URL` | `http://localhost:11434` | Chat server URL |
-| `DEFAULT_MODEL` | `llama3.2:latest` | Chat model |
-| `DEFAULT_SYSTEM_PROMPT` | `You are Chat Hacksman, an expert assistant for hackerspace members.` | System prompt |
-| `OLLAMA_API_KEY` | unset | Secret. Sent as `Authorization: Bearer ...` to Ollama (chat, model list, pull, availability checks) |
+| `LLM_URL` | `http://localhost:8080/v1` | Base URL including `/v1`, e.g. `https://api.openai.com/v1` |
+| `LLM_API_KEY` | unset | Secret. Sent as `Authorization: Bearer ...` (chat, model list, status check) |
+| `LLM_MODEL` | unset | Model used unless one is picked in the UI. Unset: the first model the server lists, which suits `llama-server` (it serves one) |
+| `DEFAULT_SYSTEM_PROMPT` | `You are Chat Hacksman, an expert assistant for hackerspace members.` | System prompt until one is saved in the UI |
 | `LLM_TIMEOUT_SECONDS` | `180` | Timeout for each chat request |
 | `LLM_RETRY_ATTEMPTS` | `2` | Attempts per chat request when the connection fails or times out |
 | `LLM_RETRY_BACKOFF_SECONDS` | `0.5` | Wait before retrying; the nth retry waits n times this |
+
+`DEFAULT_PROVIDER`, `DEFAULT_LLM_BASE_URL`, `DEFAULT_MODEL` and
+`OLLAMA_API_KEY` were replaced by the variables above in 0.8.0; the app
+won't start while any of them is set, so a stale `.env` can't point it at
+the wrong server.
 
 ## Docker (not read by the app)
 

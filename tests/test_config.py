@@ -39,14 +39,14 @@ def test_reads_secrets_and_optional_values() -> None:
     env = {
         "BASIC_AUTH_USERNAME": "demo",
         "BASIC_AUTH_PASSWORD": "dummy-password",
-        "OLLAMA_API_KEY": "dummy-ollama-key",
+        "LLM_API_KEY": "dummy-llm-key",
         "EMBEDDING_API_KEY": "dummy-embedding-key",
         "QDRANT_API_KEY": "",
         "SENTRY_DSN": "https://public@example.ingest.sentry.io/1",
     }
     settings = Settings.from_env(env)
     assert settings.basic_auth_enabled
-    assert settings.ollama_api_key == "dummy-ollama-key"
+    assert settings.llm_api_key == "dummy-llm-key"
     assert settings.embedding_api_key == "dummy-embedding-key"
     assert settings.qdrant_api_key is None
     assert settings.sentry_dsn == "https://public@example.ingest.sentry.io/1"
@@ -90,7 +90,7 @@ def test_strips_trailing_slash_from_urls() -> None:
         ("RAG_MIN_SCORE", "high", "RAG_MIN_SCORE must be a number"),
         ("LLM_TIMEOUT_SECONDS", "-1", "LLM_TIMEOUT_SECONDS must be at least"),
         ("LOG_LEVEL", "loud", "LOG_LEVEL"),
-        ("DEFAULT_PROVIDER", "openai", "DEFAULT_PROVIDER must be one of"),
+        ("LLM_URL", "localhost:8080", "LLM_URL must be an http"),
         ("EMBEDDING_URL", "localhost:8080", "EMBEDDING_URL must be an http"),
     ],
 )
@@ -197,3 +197,33 @@ def test_reads_rerank_settings() -> None:
 def test_rejects_bad_rerank_values(name: str, value: str, message: str) -> None:
     with pytest.raises(ConfigError, match=message):
         Settings.from_env({name: value})
+
+
+def test_llm_settings() -> None:
+    defaults = Settings.from_env({})
+    assert (defaults.llm_url, defaults.llm_api_key, defaults.llm_model) == (
+        "http://localhost:8080/v1",
+        None,
+        "",
+    )
+    settings = Settings.from_env(
+        {"LLM_URL": "https://api.openai.com/v1/", "LLM_MODEL": " gpt-4o-mini "}
+    )
+    assert settings.llm_url == "https://api.openai.com/v1"
+    assert settings.llm_model == "gpt-4o-mini"
+
+
+@pytest.mark.parametrize(
+    ("name", "replacement"),
+    [
+        ("DEFAULT_PROVIDER", "LLM_URL"),
+        ("DEFAULT_LLM_BASE_URL", "LLM_URL"),
+        ("DEFAULT_MODEL", "LLM_MODEL"),
+        ("OLLAMA_API_KEY", "LLM_API_KEY"),
+    ],
+)
+def test_rejects_removed_variables(name: str, replacement: str) -> None:
+    with pytest.raises(ConfigError, match=f"{name} is no longer used; set {replacement}"):
+        Settings.from_env({name: "x"})
+    # Empty counts as unset, as everywhere else.
+    Settings.from_env({name: ""})
