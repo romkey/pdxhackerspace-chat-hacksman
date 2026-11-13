@@ -218,6 +218,18 @@ def test_candidates_never_fewer_than_top_k(monkeypatch: pytest.MonkeyPatch) -> N
     assert qdrant.limits == {"wiki": 2, "events": 1}
 
 
+def test_min_score_doubling_does_not_grow_the_rerank_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(
+        Reranker(url="http://r.local", model="m"), rerank_candidates=3, min_score=0.1
+    )
+    _, qdrant, reranked = _retrieve(monkeypatch, service, ALL_SCORES)
+    # Qdrant is asked for twice as many, but only 3 per collection are reranked.
+    assert qdrant.limits == {"wiki": 6, "events": 6}
+    assert sorted(reranked[0]) == ["events-0", "events-1", "events-2", "wiki-0", "wiki-1", "wiki-2"]
+
+
 def test_failed_reranking_falls_back_to_vector_order(monkeypatch: pytest.MonkeyPatch) -> None:
     service = _service(Reranker(url="http://r.local", model="m"), rerank_candidates=4)
     chunks, _, reranked = _retrieve(monkeypatch, service, None)

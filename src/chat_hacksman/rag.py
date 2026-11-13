@@ -226,9 +226,9 @@ class RagService:
         vector: list[float],
         query_filter: Filter | None = None,
     ) -> list[Any]:
-        target_top_k = self._top_k_for_collection(collection)
-        if self.reranker is not None:
-            target_top_k = max(target_top_k, self.rerank_candidates)
+        target_top_k = self._candidate_limit(collection)
+        # Fetch extra when RAG_MIN_SCORE will drop some; retrieve() caps
+        # what's left at the candidate limit.
         search_limit = target_top_k * 2 if self.min_score > 0 else target_top_k
         if hasattr(client, "search"):
             try:
@@ -365,6 +365,12 @@ class RagService:
         if not must:
             return None
         return Filter(must=must)
+
+    def _candidate_limit(self, collection: str) -> int:
+        """Chunks to take from a collection: its top_k, or more for the
+        reranker to choose from."""
+        top_k = self._top_k_for_collection(collection)
+        return max(top_k, self.rerank_candidates) if self.reranker is not None else top_k
 
     def _top_k_for_collection(self, collection: str) -> int:
         if _is_calibre_collection(collection) and self.top_k_calibre is not None:
@@ -526,7 +532,12 @@ class RagService:
                 )
                 continue
 
+            # Without reranking, extra hits are trimmed by the overall limit
+            # below; with it, every hit kept here is sent to the reranker.
+            kept = 0
             for hit in hits:
+                if self.reranker is not None and kept >= self._candidate_limit(collection):
+                    break
                 payload = hit.payload if isinstance(hit.payload, dict) else {}
                 text = _extract_chunk_text(payload)
                 if not text:
@@ -534,6 +545,7 @@ class RagService:
                 score = float(hit.score)
                 if score < self.min_score:
                     continue
+                kept += 1
                 out.append(
                     ContextChunk(
                         collection=collection,
