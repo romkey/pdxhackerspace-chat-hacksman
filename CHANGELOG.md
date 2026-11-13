@@ -7,6 +7,12 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+### Fixed
+
+- The Release workflow no longer fails to push the image after a release
+  PR is merged: it wrote the build cache from the closed PR's event, which
+  isn't allowed.
+
 ## [0.6.0] - 2026-11-13
 
 ### Changed

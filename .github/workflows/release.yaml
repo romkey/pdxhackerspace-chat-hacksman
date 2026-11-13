@@ -244,7 +244,10 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # A merged release PR runs this from its closed pull_request event,
+          # whose token can't write the Actions cache ("cache write denied:
+          # token has no writable scopes"), so only a tag push writes it.
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max' || '' }}
           provenance: mode=max
           sbom: true
 
