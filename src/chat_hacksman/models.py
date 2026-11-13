@@ -111,8 +111,11 @@ class OccurrenceRecord(BaseModel):
 
 class ContextChunk(BaseModel):
     collection: str
+    # Vector similarity from Qdrant.
     score: float
     text: str
+    # Relevance from the reranker, when reranking ran (higher is better).
+    rerank_score: float | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

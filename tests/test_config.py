@@ -149,3 +149,51 @@ def test_query_prefix_follows_model_unless_set() -> None:
 )
 def test_parse_prefix(value: str, prefix: str) -> None:
     assert parse_prefix(value) == prefix
+
+
+def test_reranking_is_off_by_default() -> None:
+    settings = Settings.from_env({})
+    assert settings.rerank_url is None
+    assert settings.rerank_api == "jina"
+    assert settings.rerank_model == "BAAI/bge-reranker-v2-m3"
+    assert settings.rerank_candidates == 10
+    assert settings.rerank_top_n is None
+    assert settings.rerank_min_score is None
+
+
+def test_reads_rerank_settings() -> None:
+    env = {
+        "RERANK_URL": "http://tei.local:8080/",
+        "RERANK_API": "TEI",
+        "RERANK_API_KEY": "dummy-rerank-key",
+        "RERANK_MODEL": "Alibaba-NLP/gte-reranker-modernbert-base",
+        "RERANK_CANDIDATES": "25",
+        "RERANK_TOP_N": "6",
+        "RERANK_MIN_SCORE": "0.1",
+        "RERANK_CONTEXT_LENGTH": "512",
+        "RERANK_TIMEOUT_SECONDS": "10",
+    }
+    settings = Settings.from_env(env)
+    assert settings.rerank_url == "http://tei.local:8080"
+    assert settings.rerank_api == "tei"
+    assert settings.rerank_api_key == "dummy-rerank-key"
+    assert settings.rerank_model == "Alibaba-NLP/gte-reranker-modernbert-base"
+    assert (settings.rerank_candidates, settings.rerank_top_n) == (25, 6)
+    assert settings.rerank_min_score == 0.1
+    assert settings.rerank_context_length == 512
+    assert settings.rerank_timeout_seconds == 10.0
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("RERANK_API", "cohere", "RERANK_API must be one of jina, tei"),
+        ("RERANK_URL", "tei.local", "RERANK_URL must be an http"),
+        ("RERANK_CANDIDATES", "0", "RERANK_CANDIDATES must be at least 1"),
+        ("RERANK_TOP_N", "0", "RERANK_TOP_N must be at least 1"),
+        ("RERANK_MIN_SCORE", "low", "RERANK_MIN_SCORE must be a number"),
+    ],
+)
+def test_rejects_bad_rerank_values(name: str, value: str, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        Settings.from_env({name: value})

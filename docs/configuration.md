@@ -69,6 +69,49 @@ ingester must embed documents with the matching document prefix.
 | `Qwen/Qwen3-Embedding-0.6B` | `Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:` | none | 1024 | 32768 |
 | OpenAI `text-embedding-3-small` / `-large` | none | none | 1536 / 3072 | 8191 |
 
+## Reranking
+
+An optional second pass after the vector search. Each enabled collection
+is searched for `RERANK_CANDIDATES` chunks (at least its `RAG_TOP_K*`);
+all of them are sent with the question to a cross-encoder reranker, which
+scores how well each chunk answers it; the best `RERANK_TOP_N` go to the
+LLM, from whichever collections they come from. Reranking is off unless
+`RERANK_URL` is set, and if the reranker fails the vector order is used.
+`RAG_MIN_SCORE` still drops weak vector hits before reranking.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `RERANK_URL` | unset (off) | Base URL; requests go to `{RERANK_URL}/rerank` |
+| `RERANK_API` | `jina` | `jina`: Jina/Cohere format (`documents` in, `results[].relevance_score` out), spoken by Jina, Cohere, llama.cpp, vLLM and Infinity. `tei`: Hugging Face text-embeddings-inference format (`texts` in, `[{index, score}]` out) |
+| `RERANK_API_KEY` | unset | Secret. Sent as `Authorization: Bearer ...` |
+| `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Model name (not sent with `tei`, which serves one model) |
+| `RERANK_CANDIDATES` | `10` | Chunks per collection for the reranker to choose from (at least 1). Reranking time grows with candidates × collections |
+| `RERANK_TOP_N` | sum of the collections' `RAG_TOP_K*` | Chunks kept after reranking |
+| `RERANK_MIN_SCORE` | unset | Drop chunks scored below this. The scale depends on the server and model (TEI returns 0-1; llama.cpp can return raw scores, about -11 to 4 for `bge-reranker-v2-m3`), so check a few `rerank_score` values in chat responses first |
+| `RERANK_CONTEXT_LENGTH` | `8192` | Tokens per question + chunk pair; the question gets at most a quarter, chunks are cut to fit the rest |
+| `RERANK_TIMEOUT_SECONDS` | `30` | Timeout for each rerank request |
+
+Where to get one (any of these serve the default model):
+
+| Server | Start it | Settings |
+|--------|----------|----------|
+| llama.cpp | `llama-server -m <reranker>.gguf --reranking --port 8012` | `RERANK_URL=http://localhost:8012/v1` |
+| vLLM | `vllm serve BAAI/bge-reranker-v2-m3` | `RERANK_URL=http://localhost:8000/v1` |
+| [Hugging Face TEI](https://huggingface.github.io/text-embeddings-inference/) | `docker run -p 8080:80 ghcr.io/huggingface/text-embeddings-inference:cpu-1.9 --model-id BAAI/bge-reranker-v2-m3` (`cpu-arm64-1.9` on ARM) | `RERANK_URL=http://localhost:8080`, `RERANK_API=tei` |
+| Infinity | its `/rerank` endpoint | `RERANK_URL=<base URL>` |
+| Jina AI | hosted | `RERANK_URL=https://api.jina.ai/v1`, `RERANK_API_KEY` |
+| Cohere | hosted | `RERANK_URL=https://api.cohere.com/v2`, `RERANK_API_KEY` |
+
+Reranker models:
+
+| Model | Languages | Context | License | Notes |
+|-------|-----------|---------|---------|-------|
+| `BAAI/bge-reranker-v2-m3` (default) | multilingual | 8192 | Apache-2.0 | |
+| `Alibaba-NLP/gte-reranker-modernbert-base` | English | 8192 | Apache-2.0 | Smaller and faster |
+| `BAAI/bge-reranker-base`, `-large` | English, Chinese | 512 | MIT | Set `RERANK_CONTEXT_LENGTH=512` |
+| `mixedbread-ai/mxbai-rerank-base-v1` | English | 512 | Apache-2.0 | Set `RERANK_CONTEXT_LENGTH=512` |
+| `jinaai/jina-reranker-v2-base-multilingual` | multilingual | 1024 | CC-BY-NC-4.0 | Non-commercial use only |
+
 ## Chat models
 
 Defaults for the settings form; what's saved in the UI wins after that.

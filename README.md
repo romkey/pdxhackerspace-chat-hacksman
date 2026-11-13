@@ -22,6 +22,7 @@ events feed, chat history and thumbs-up/down feedback are kept in SQLite.
 | `src/chat_hacksman/config.py` | `Settings` from environment variables; embedding query prefixes |
 | `src/chat_hacksman/server.py` | The FastAPI app (`create_app`) and its HTTP API |
 | `src/chat_hacksman/rag.py` | Embeds questions and searches Qdrant, with per-collection filters |
+| `src/chat_hacksman/rerank.py` | Optional reranker client (Jina/Cohere and TEI formats) |
 | `src/chat_hacksman/llm.py` | Builds the prompt and calls Ollama or llama.cpp, with retries |
 | `src/chat_hacksman/storage.py` | SQLite: settings, history, feedback, events, LLM server status |
 | `src/chat_hacksman/topics.py` | Fetches and caches the topics/events feed |
@@ -46,16 +47,22 @@ A question goes through these steps:
    whose vector size doesn't match. Collections named `events*`, `slack*`
    and `calibre*` get filters picked from the question's wording (upcoming
    vs. past events, channel vs. thread summaries, catalog vs. passages).
-   Hits below `RAG_MIN_SCORE` are dropped. Schedule questions with no
-   event hits fall back to upcoming events from the feed.
-3. **Answer.** The chunks go into the system prompt and the question to
+   Hits below `RAG_MIN_SCORE` are dropped.
+3. **Rerank** (optional, when `RERANK_URL` is set). More candidates are
+   fetched per collection, and a cross-encoder reranker (default
+   `BAAI/bge-reranker-v2-m3`, served by llama.cpp, vLLM, TEI, Infinity, or
+   the Jina or Cohere APIs) scores each against the question; only the
+   best go on, from whichever collections they come from. See
+   [docs/configuration.md](docs/configuration.md#reranking). Schedule
+   questions with no event hits fall back to upcoming events from the feed.
+4. **Answer.** The chunks go into the system prompt and the question to
    the chat model: Ollama's `POST /api/chat`, or llama.cpp's
    OpenAI-compatible `POST /v1/chat/completions`.
-4. **Record.** The question, answer, settings and timings are saved to
+5. **Record.** The question, answer, settings and timings are saved to
    history unless it's a temporary chat.
 
 If Qdrant or the embedding server is unreachable, the chat still works
-without RAG.
+without RAG; if the reranker is, the vector search order is used.
 
 HTTP API (all under optional basic auth except the health checks):
 

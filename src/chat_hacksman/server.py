@@ -49,6 +49,7 @@ from chat_hacksman.models import (
     SettingsUpdate,
 )
 from chat_hacksman.rag import RagService
+from chat_hacksman.rerank import Reranker
 from chat_hacksman.storage import Storage
 from chat_hacksman.topics import TopicsFetchError, TopicsService
 
@@ -98,6 +99,10 @@ def build_services(settings: Settings) -> Services:
             embedding_timeout_seconds=settings.embedding_timeout_seconds,
             embedding_api_key=settings.embedding_api_key,
             embedding_query_prefix=settings.embedding_query_prefix,
+            reranker=build_reranker(settings),
+            rerank_candidates=settings.rerank_candidates,
+            rerank_top_n=settings.rerank_top_n,
+            rerank_min_score=settings.rerank_min_score,
         ),
         llm=LlmService(
             request_timeout_seconds=settings.llm_timeout_seconds,
@@ -105,6 +110,20 @@ def build_services(settings: Settings) -> Services:
             retry_backoff_seconds=settings.llm_retry_backoff_seconds,
             ollama_api_key=settings.ollama_api_key,
         ),
+    )
+
+
+def build_reranker(settings: Settings) -> Reranker | None:
+    """The reranker, if RERANK_URL is set; reranking is off otherwise."""
+    if settings.rerank_url is None:
+        return None
+    return Reranker(
+        url=settings.rerank_url,
+        model=settings.rerank_model,
+        api=settings.rerank_api,
+        api_key=settings.rerank_api_key,
+        timeout_seconds=settings.rerank_timeout_seconds,
+        context_length=settings.rerank_context_length,
     )
 
 
@@ -289,6 +308,15 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         "Configured Qdrant collections: %s",
         ",".join(config.rag_collections) if config.rag_collections else "(none)",
     )
+    if config.rerank_url:
+        logger.info(
+            "Reranking with model=%s at %s (api=%s)",
+            config.rerank_model,
+            config.rerank_url,
+            config.rerank_api,
+        )
+    else:
+        logger.info("Reranking is off; set RERANK_URL to turn it on")
     if bool(config.basic_auth_username) ^ bool(config.basic_auth_password):
         logger.warning(
             "Basic auth partially configured; set both BASIC_AUTH_USERNAME and "
