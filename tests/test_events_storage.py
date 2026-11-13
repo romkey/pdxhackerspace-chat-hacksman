@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 from pathlib import Path
 
-from app.models import AppSettings
-from app.storage import Storage
+from chat_hacksman.models import AppSettings
+from chat_hacksman.storage import Storage
 
 
 def test_storage_upsert_and_get_events(tmp_path: Path) -> None:

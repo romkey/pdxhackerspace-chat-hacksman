@@ -1,53 +1,151 @@
-from __future__ import annotations
+from pathlib import Path
 
-from app.config import load_config
+import pytest
 
-
-def test_load_config_supports_rag_collection_4_and_5(monkeypatch) -> None:
-    monkeypatch.setenv("RAG_COLLECTIONS", "")
-    monkeypatch.setenv("RAG_COLLECTION_1", "one")
-    monkeypatch.setenv("RAG_COLLECTION_2", "two")
-    monkeypatch.setenv("RAG_COLLECTION_3", "three")
-    monkeypatch.setenv("RAG_COLLECTION_4", "four")
-    monkeypatch.setenv("RAG_COLLECTION_5", "five")
-
-    config = load_config()
-    assert config.rag_collections == ["one", "two", "three", "four", "five"]
+from chat_hacksman.config import ConfigError, Settings, known_query_prefix, parse_prefix
 
 
-def test_load_config_reads_basic_auth_env(monkeypatch) -> None:
-    monkeypatch.setenv("BASIC_AUTH_USERNAME", "demo")
-    monkeypatch.setenv("BASIC_AUTH_PASSWORD", "secret")
-
-    config = load_config()
-    assert config.basic_auth_username == "demo"
-    assert config.basic_auth_password == "secret"
-
-
-def test_load_config_reads_collection_specific_top_k_env(monkeypatch) -> None:
-    monkeypatch.setenv("RAG_TOP_K_EVENTS", "7")
-    monkeypatch.setenv("RAG_TOP_K_SLACK", "6")
-    monkeypatch.setenv("RAG_TOP_K_CALIBRE", "5")
-
-    config = load_config()
-    assert config.rag_top_k_events == 7
-    assert config.rag_top_k_slack == 6
-    assert config.rag_top_k_calibre == 5
+def test_defaults() -> None:
+    settings = Settings.from_env({})
+    assert settings == Settings()
+    assert settings.db_path == Path("data/chat_hacksman.db")
+    assert settings.embedding_url == "http://localhost:8080/v1"
+    assert settings.embedding_model == "nomic-ai/modernbert-embed-base"
+    assert settings.embedding_query_prefix == "search_query: "
+    assert settings.embedding_api_key is None
+    assert not settings.basic_auth_enabled
 
 
-def test_load_config_reads_embedding_context_length(monkeypatch) -> None:
-    monkeypatch.setenv("EMBEDDING_CONTEXT_LENGTH", "2048")
-    config = load_config()
-    assert config.embedding_context_length == 2048
+def test_supports_rag_collection_1_to_5_after_list() -> None:
+    env = {
+        "RAG_COLLECTIONS": "zero, one",
+        "RAG_COLLECTION_1": "one",
+        "RAG_COLLECTION_2": "two",
+        "RAG_COLLECTION_3": "three",
+        "RAG_COLLECTION_4": "four",
+        "RAG_COLLECTION_5": "five",
+    }
+    assert Settings.from_env(env).rag_collections == (
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+    )
 
 
-def test_load_config_reads_sentry_dsn(monkeypatch) -> None:
-    monkeypatch.setenv("SENTRY_DSN", "https://public@example.ingest.sentry.io/1")
-    config = load_config()
-    assert config.sentry_dsn == "https://public@example.ingest.sentry.io/1"
+def test_reads_secrets_and_optional_values() -> None:
+    env = {
+        "BASIC_AUTH_USERNAME": "demo",
+        "BASIC_AUTH_PASSWORD": "dummy-password",
+        "OLLAMA_API_KEY": "dummy-ollama-key",
+        "EMBEDDING_API_KEY": "dummy-embedding-key",
+        "QDRANT_API_KEY": "",
+        "SENTRY_DSN": "https://public@example.ingest.sentry.io/1",
+    }
+    settings = Settings.from_env(env)
+    assert settings.basic_auth_enabled
+    assert settings.ollama_api_key == "dummy-ollama-key"
+    assert settings.embedding_api_key == "dummy-embedding-key"
+    assert settings.qdrant_api_key is None
+    assert settings.sentry_dsn == "https://public@example.ingest.sentry.io/1"
 
 
-def test_load_config_reads_ollama_api_key(monkeypatch) -> None:
-    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-secret")
-    config = load_config()
-    assert config.ollama_api_key == "ollama-secret"
+def test_reads_numbers() -> None:
+    env = {
+        "APP_PORT": "9000",
+        "RAG_TOP_K_EVENTS": "7",
+        "RAG_TOP_K_SLACK": "6",
+        "RAG_TOP_K_CALIBRE": "5",
+        "RAG_MIN_SCORE": "0.25",
+        "EMBEDDING_CONTEXT_LENGTH": "2048",
+        "LLM_TIMEOUT_SECONDS": "60",
+    }
+    settings = Settings.from_env(env)
+    assert settings.port == 9000
+    assert (settings.rag_top_k_events, settings.rag_top_k_slack, settings.rag_top_k_calibre) == (
+        7,
+        6,
+        5,
+    )
+    assert settings.rag_min_score == 0.25
+    assert settings.embedding_context_length == 2048
+    assert settings.llm_timeout_seconds == 60.0
+
+
+def test_strips_trailing_slash_from_urls() -> None:
+    assert Settings.from_env({"EMBEDDING_URL": "https://api.openai.com/v1/"}).embedding_url == (
+        "https://api.openai.com/v1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("APP_PORT", "eighty", "APP_PORT must be a whole number"),
+        ("APP_PORT", "0", "APP_PORT must be at least 1"),
+        ("APP_PORT", "65536", "APP_PORT must be 1-65535"),
+        ("RAG_TOP_K", "0", "RAG_TOP_K must be at least 1"),
+        ("RAG_MIN_SCORE", "high", "RAG_MIN_SCORE must be a number"),
+        ("LLM_TIMEOUT_SECONDS", "-1", "LLM_TIMEOUT_SECONDS must be at least"),
+        ("LOG_LEVEL", "loud", "LOG_LEVEL"),
+        ("DEFAULT_PROVIDER", "openai", "DEFAULT_PROVIDER must be one of"),
+        ("EMBEDDING_URL", "localhost:8080", "EMBEDDING_URL must be an http"),
+    ],
+)
+def test_rejects_bad_values(name: str, value: str, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        Settings.from_env({name: value})
+
+
+@pytest.mark.parametrize(
+    ("model", "prefix"),
+    [
+        ("nomic-ai/modernbert-embed-base", "search_query: "),
+        ("modernbert-embed-base", "search_query: "),
+        ("nomic-embed-text-v1.5", "search_query: "),
+        ("nomic-ai/nomic-embed-text-v1.5:latest", "search_query: "),
+        ("intfloat/e5-large-v2", "query: "),
+        ("intfloat/multilingual-e5-large", "query: "),
+        (
+            "mixedbread-ai/mxbai-embed-large-v1",
+            "Represent this sentence for searching relevant passages: ",
+        ),
+        (
+            "Qwen/Qwen3-Embedding-0.6B",
+            "Instruct: Given a web search query, retrieve relevant passages that answer the query"
+            "\nQuery:",
+        ),
+        ("text-embedding-3-small", ""),
+        ("text-embedding-3-large", ""),
+        ("some/unknown-model", ""),
+    ],
+)
+def test_known_query_prefix(model: str, prefix: str) -> None:
+    assert known_query_prefix(model) == prefix
+
+
+def test_query_prefix_follows_model_unless_set() -> None:
+    assert Settings.from_env(
+        {"EMBEDDING_MODEL": "intfloat/e5-large-v2"}
+    ).embedding_query_prefix == ("query: ")
+    env = {"EMBEDDING_MODEL": "intfloat/e5-large-v2", "EMBEDDING_QUERY_PREFIX": "none"}
+    assert Settings.from_env(env).embedding_query_prefix == ""
+    env = {"EMBEDDING_MODEL": "intfloat/e5-large-v2", "EMBEDDING_QUERY_PREFIX": ""}
+    assert Settings.from_env(env).embedding_query_prefix == "query: "
+
+
+@pytest.mark.parametrize(
+    ("value", "prefix"),
+    [
+        ("none", ""),
+        ("NONE", ""),
+        ("search_query: ", "search_query: "),
+        ("search_query:", "search_query: "),
+        ("Instruct: find\\nQuery:", "Instruct: find\nQuery: "),
+        ("Line\\n", "Line\n"),
+    ],
+)
+def test_parse_prefix(value: str, prefix: str) -> None:
+    assert parse_prefix(value) == prefix

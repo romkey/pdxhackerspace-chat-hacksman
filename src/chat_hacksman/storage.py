@@ -1,12 +1,14 @@
-from __future__ import annotations
-
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
-from app.models import (
+# Any: feed records and stored snapshots are untyped JSON.
+from typing import Any, Literal
+
+from chat_hacksman.models import (
     AppSettings,
     EventRecord,
     FeedbackCreateRequest,
@@ -15,24 +17,37 @@ from app.models import (
     OccurrenceRecord,
 )
 
+# Bump when the schema changes, and migrate older databases in _init_db
+# (stored in SQLite's PRAGMA user_version).
+SCHEMA_VERSION = 1
+
 
 class Storage:
-    def __init__(self, db_path: str, default_settings: AppSettings) -> None:
-        self.db_path = db_path
+    def __init__(self, db_path: str | Path, default_settings: AppSettings) -> None:
+        self.db_path = Path(db_path)
         self.default_settings = default_settings
         self._ensure_parent_dir()
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """A connection that commits on success, rolls back on error, and closes."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _ensure_parent_dir(self) -> None:
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _init_db(self) -> None:
         with self._connect() as conn:
+            # WAL survives restarts; it lets readers and the writer not block each other.
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS app_settings (
@@ -139,7 +154,9 @@ class Storage:
                 )
                 """
             )
-            conn.commit()
+            # Version 1 is the schema above, which older databases reach through
+            # CREATE TABLE IF NOT EXISTS and _ensure_chat_history_prompt_id_column.
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION:d}")
 
     def _ensure_chat_history_prompt_id_column(self, conn: sqlite3.Connection) -> None:
         columns = conn.execute("PRAGMA table_info(chat_history)").fetchall()
@@ -224,9 +241,7 @@ class Storage:
             ).fetchall()
         return [str(row["url"]) for row in rows]
 
-    def get_llm_base_url_status(
-        self, llm_base_url: str
-    ) -> tuple[bool, datetime, datetime] | None:
+    def get_llm_base_url_status(self, llm_base_url: str) -> tuple[bool, datetime, datetime] | None:
         normalized = llm_base_url.strip()
         if not normalized:
             return None
@@ -451,7 +466,7 @@ class Storage:
 
         records: list[FeedbackRecord] = []
         for row in rows:
-            rating = "up" if row["rating"] == "up" else "down"
+            rating: Literal["up", "down"] = "up" if row["rating"] == "up" else "down"
             records.append(
                 FeedbackRecord(
                     id=row["id"],

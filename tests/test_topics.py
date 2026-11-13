@@ -1,8 +1,15 @@
 import asyncio
+from collections.abc import Callable
 
 import httpx
+import pytest
 
-from app.topics import TopicsFetchError, TopicsService, parse_topics_payload
+from chat_hacksman.topics import TopicsFetchError, TopicsService, parse_topics_payload
+from tests.conftest import Handler
+
+
+def timeout(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectTimeout("timed out", request=request)
 
 
 def test_parse_topics_payload_handles_expected_keys() -> None:
@@ -43,53 +50,31 @@ def test_parse_topics_payload_falls_back_to_event_titles() -> None:
     assert parsed["all_topics"] == ["Dorkbot", "Exploit Workshop"]
 
 
-def test_topics_service_raises_clean_fetch_error_without_cache(monkeypatch) -> None:
+def test_topics_service_raises_clean_fetch_error_without_cache(
+    mock_http: Callable[[Handler], None],
+) -> None:
     service = TopicsService("https://example.invalid/topics.json", 300)
 
-    class FakeAsyncClient:
-        async def __aenter__(self):
-            return self
+    mock_http(timeout)
 
-        async def __aexit__(self, exc_type, exc, tb):
-            del exc_type, exc, tb
-            return False
-
-        async def get(self, url):  # noqa: ANN001
-            del url
-            raise httpx.ConnectTimeout("timed out")
-
-    monkeypatch.setattr("app.topics.httpx.AsyncClient", lambda timeout: FakeAsyncClient())
-
-    try:
+    with pytest.raises(TopicsFetchError) as exc_info:
         asyncio.run(service.get_topics())
-        raise AssertionError("Expected TopicsFetchError")
-    except TopicsFetchError as exc:
-        message = str(exc)
-        assert "url=https://example.invalid/topics.json" in message
-        assert "error_type=ConnectTimeout" in message
+    message = str(exc_info.value)
+    assert "url=https://example.invalid/topics.json" in message
+    assert "error_type=ConnectTimeout" in message
 
 
-def test_topics_service_uses_cached_topics_on_fetch_failure(monkeypatch) -> None:
+def test_topics_service_uses_cached_topics_on_fetch_failure(
+    mock_http: Callable[[Handler], None],
+) -> None:
     service = TopicsService("https://example.invalid/topics.json", 300)
-    service._cache_data = {  # noqa: SLF001
+    service._cache_data = {
         "interests": ["welding"],
         "training_topics": ["laser"],
         "all_topics": ["laser", "welding"],
     }
-    service._cache_expires_at = 0.0  # noqa: SLF001
+    service._cache_expires_at = 0.0
 
-    class FakeAsyncClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            del exc_type, exc, tb
-            return False
-
-        async def get(self, url):  # noqa: ANN001
-            del url
-            raise httpx.ConnectTimeout("timed out")
-
-    monkeypatch.setattr("app.topics.httpx.AsyncClient", lambda timeout: FakeAsyncClient())
+    mock_http(timeout)
     result = asyncio.run(service.get_topics())
     assert result["all_topics"] == ["laser", "welding"]

@@ -1,10 +1,11 @@
-from __future__ import annotations
-
 import asyncio
+from collections.abc import Callable
 
-import app.llm as llm_module
-from app.llm import LlmService, _build_system_prompt
-from app.models import AppSettings, ContextChunk
+import httpx
+
+from chat_hacksman.llm import LlmService, _build_system_prompt
+from chat_hacksman.models import AppSettings, ContextChunk
+from tests.conftest import Handler
 
 
 def test_build_system_prompt_enriches_calibre_chunk_metadata() -> None:
@@ -184,34 +185,16 @@ def test_build_system_prompt_adds_events_guidance_when_present() -> None:
     assert "For events context: always mention the date and time" in prompt
 
 
-def test_ollama_chat_sends_configured_api_key(monkeypatch) -> None:
-    captured: dict[str, str] = {}
+def test_ollama_chat_sends_configured_api_key(mock_http: Callable[[Handler], None]) -> None:
+    seen: list[httpx.Request] = []
 
-    class FakeResponse:
-        status_code = 200
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200, json={"message": {"content": "ok"}, "prompt_eval_count": 1, "eval_count": 1}
+        )
 
-        text = ""
-
-        def json(self):
-            return {"message": {"content": "ok"}, "prompt_eval_count": 1, "eval_count": 1}
-
-    class FakeAsyncClient:
-        def __init__(self, timeout):
-            del timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            del exc_type, exc, tb
-            return False
-
-        async def post(self, url, json, headers):
-            del url, json
-            captured.update(headers)
-            return FakeResponse()
-
-    monkeypatch.setattr(llm_module.httpx, "AsyncClient", FakeAsyncClient)
+    mock_http(handler)
 
     service = LlmService(ollama_api_key="ollama-secret")
     settings = AppSettings(
@@ -226,4 +209,4 @@ def test_ollama_chat_sends_configured_api_key(monkeypatch) -> None:
     )
 
     assert answer == "ok"
-    assert captured["Authorization"] == "Bearer ollama-secret"
+    assert seen[0].headers["Authorization"] == "Bearer ollama-secret"

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 from datetime import datetime
+
+# Any: payloads, metadata and metrics are free-form JSON objects.
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
