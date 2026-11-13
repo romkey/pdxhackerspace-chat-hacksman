@@ -1,10 +1,15 @@
-from __future__ import annotations
-
 import asyncio
+import json
+from collections.abc import Callable
 from types import SimpleNamespace
+from typing import cast
 
-import app.rag as rag_module
-from app.rag import RagService, _extract_chunk_text
+import httpx
+import pytest
+from qdrant_client import QdrantClient
+
+from chat_hacksman.rag import RagService, _extract_chunk_text
+from tests.conftest import Handler
 
 
 def _service() -> RagService:
@@ -18,15 +23,16 @@ def _service() -> RagService:
     )
 
 
-def test_rag_retrieve_works_with_legacy_search_api(monkeypatch) -> None:
+def test_rag_retrieve_works_with_legacy_search_api(monkeypatch: pytest.MonkeyPatch) -> None:
     service = _service()
 
-    async def fake_embed_query(self, _: str):  # noqa: ANN001
-        del self
+    async def fake_embed_query(self: RagService, _: str) -> list[float]:
         return [0.1, 0.2, 0.3]
 
     class FakeClient:
-        def search(self, *, collection_name, query_vector, with_payload, limit):
+        def search(
+            self, *, collection_name: str, query_vector: object, with_payload: bool, limit: int
+        ) -> list[SimpleNamespace]:
             del query_vector, with_payload, limit
             return [
                 SimpleNamespace(
@@ -44,15 +50,16 @@ def test_rag_retrieve_works_with_legacy_search_api(monkeypatch) -> None:
     assert "Result from wiki" in results[0].text
 
 
-def test_rag_retrieve_works_with_query_points_api(monkeypatch) -> None:
+def test_rag_retrieve_works_with_query_points_api(monkeypatch: pytest.MonkeyPatch) -> None:
     service = _service()
 
-    async def fake_embed_query(self, _: str):  # noqa: ANN001
-        del self
+    async def fake_embed_query(self: RagService, _: str) -> list[float]:
         return [0.1, 0.2, 0.3]
 
     class FakeClient:
-        def query_points(self, *, collection_name, query, with_payload, limit):
+        def query_points(
+            self, *, collection_name: str, query: object, with_payload: bool, limit: int
+        ) -> SimpleNamespace:
             del query, with_payload, limit
             return SimpleNamespace(
                 points=[
@@ -72,23 +79,24 @@ def test_rag_retrieve_works_with_query_points_api(monkeypatch) -> None:
     assert "Point from wiki" in results[0].text
 
 
-def test_rag_retrieve_skips_collection_when_vector_dim_mismatch(monkeypatch) -> None:
+def test_rag_retrieve_skips_collection_when_vector_dim_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = _service()
 
-    async def fake_embed_query(self, _: str):  # noqa: ANN001
-        del self
+    async def fake_embed_query(self: RagService, _: str) -> list[float]:
         return [0.1, 0.2, 0.3, 0.4]
 
     class FakeClient:
-        def get_collection(self, *, collection_name):
+        def get_collection(self, *, collection_name: str) -> SimpleNamespace:
             del collection_name
             return SimpleNamespace(
-                config=SimpleNamespace(
-                    params=SimpleNamespace(vectors=SimpleNamespace(size=3))
-                )
+                config=SimpleNamespace(params=SimpleNamespace(vectors=SimpleNamespace(size=3)))
             )
 
-        def query_points(self, *, collection_name, query, with_payload, limit):
+        def query_points(
+            self, *, collection_name: str, query: object, with_payload: bool, limit: int
+        ) -> SimpleNamespace:
             del collection_name, query, with_payload, limit
             raise AssertionError("query_points should not be called on dimension mismatch")
 
@@ -123,126 +131,145 @@ def test_extract_chunk_text_does_not_treat_doc_type_alone_as_slack() -> None:
     assert _extract_chunk_text(payload) == "Canonical event text"
 
 
-def test_embed_query_uses_modern_embed_endpoint_first(monkeypatch) -> None:
+def _embedding_response(vector: list[float]) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": vector}],
+            "model": "nomic-ai/modernbert-embed-base",
+        },
+    )
+
+
+def test_embed_query_calls_openai_embeddings_endpoint(
+    mock_http: Callable[[Handler], None],
+) -> None:
     service = _service()
+    service.embedding_url = "http://embed.local/v1"
+    service.embedding_api_key = "dummy-embedding-key"
+    service.embedding_query_prefix = "search_query: "
+    seen: list[httpx.Request] = []
 
-    async def fake_modern(self, query):  # noqa: ANN001
-        del self, query
-        return [0.5, 0.6]
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _embedding_response([0.5, 0.6])
 
-    async def fake_legacy(self, query):  # noqa: ANN001
-        del self, query
-        raise AssertionError("legacy endpoint should not be called when modern succeeds")
+    mock_http(handler)
 
-    monkeypatch.setattr(type(service), "_embed_query_modern", fake_modern)
-    monkeypatch.setattr(type(service), "_embed_query_legacy", fake_legacy)
+    assert asyncio.run(service._embed_query("hello")) == [0.5, 0.6]
+    (request,) = seen
+    assert request.method == "POST"
+    assert str(request.url) == "http://embed.local/v1/embeddings"
+    assert request.headers["Authorization"] == "Bearer dummy-embedding-key"
+    assert json.loads(request.content) == {
+        "model": "nomic-embed-text",
+        "input": ["search_query: hello"],
+        "encoding_format": "float",
+    }
 
-    vector = asyncio.run(service._embed_query("hello"))
-    assert vector == [0.5, 0.6]
 
-
-def test_modern_embed_sends_configured_ollama_api_key(monkeypatch) -> None:
+def test_embed_query_sends_no_auth_header_without_api_key(
+    mock_http: Callable[[Handler], None],
+) -> None:
     service = _service()
-    service.ollama_api_key = "ollama-secret"
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _embedding_response([1.0])
+
+    mock_http(handler)
+    assert asyncio.run(service._embed_query("hello")) == [1.0]
+    assert "Authorization" not in seen[0].headers
+    assert json.loads(seen[0].content)["input"] == ["hello"]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(500, text="boom"),
+        httpx.Response(200, text="not json"),
+        httpx.Response(200, json={"data": []}),
+        httpx.Response(200, json={"data": [{"embedding": []}]}),
+        httpx.Response(200, json=[1, 2]),
+    ],
+)
+def test_embed_query_returns_none_on_bad_responses(
+    mock_http: Callable[[Handler], None], response: httpx.Response
+) -> None:
+    mock_http(lambda request: response)
+    assert asyncio.run(_service()._embed_query("hello")) is None
+
+
+def test_embed_query_returns_none_when_server_is_down(
+    mock_http: Callable[[Handler], None],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    mock_http(handler)
+    assert asyncio.run(_service()._embed_query("hello")) is None
+
+
+def _capture_embedding_input(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     captured: dict[str, str] = {}
 
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
+    async def fake_request(self: RagService, text: str) -> list[float]:
+        captured["text"] = text
+        return [0.5, 0.6]
 
-        def json(self):
-            return {"embeddings": [[0.5, 0.6]]}
-
-    class FakeAsyncClient:
-        def __init__(self, timeout):
-            del timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            del exc_type, exc, tb
-            return False
-
-        async def post(self, url, json, headers):
-            del url, json
-            captured.update(headers)
-            return FakeResponse()
-
-    monkeypatch.setattr(rag_module.httpx, "AsyncClient", FakeAsyncClient)
-
-    vector = asyncio.run(service._embed_query_modern("hello"))
-
-    assert vector == [0.5, 0.6]
-    assert captured["Authorization"] == "Bearer ollama-secret"
+    monkeypatch.setattr(RagService, "_request_embedding", fake_request)
+    return captured
 
 
-def test_embed_query_falls_back_to_legacy_endpoint(monkeypatch) -> None:
-    service = _service()
-
-    async def fake_modern(self, query):  # noqa: ANN001
-        del self, query
-        return None
-
-    async def fake_legacy(self, query):  # noqa: ANN001
-        del self, query
-        return [0.7, 0.8]
-
-    monkeypatch.setattr(type(service), "_embed_query_modern", fake_modern)
-    monkeypatch.setattr(type(service), "_embed_query_legacy", fake_legacy)
-
-    vector = asyncio.run(service._embed_query("hello"))
-    assert vector == [0.7, 0.8]
-
-
-def test_embed_query_truncates_to_embedding_context_length(monkeypatch) -> None:
+def test_embed_query_truncates_to_embedding_context_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = _service()
     service.embedding_context_length = 3
+    captured = _capture_embedding_input(monkeypatch)
 
-    captured: dict[str, str] = {}
-
-    async def fake_modern(self, query):  # noqa: ANN001
-        del self
-        captured["query"] = query
-        return [0.5, 0.6]
-
-    monkeypatch.setattr(type(service), "_embed_query_modern", fake_modern)
-    monkeypatch.setattr(type(service), "_embed_query_legacy", fake_modern)
-
-    vector = asyncio.run(service._embed_query("one two three four five"))
-    assert vector == [0.5, 0.6]
-    assert captured["query"] == "one two three"
+    assert asyncio.run(service._embed_query("one two three four five")) == [0.5, 0.6]
+    assert captured["text"] == "one two three"
 
 
-def test_embed_query_truncates_long_single_token_input(monkeypatch) -> None:
+def test_embed_query_keeps_prefix_whole_when_truncating(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service()
+    service.embedding_context_length = 4
+    service.embedding_query_prefix = "query: "
+    captured = _capture_embedding_input(monkeypatch)
+
+    asyncio.run(service._embed_query("one two three four five"))
+    assert captured["text"] == "query: one two three"
+
+
+def test_embed_query_truncates_long_single_token_input(monkeypatch: pytest.MonkeyPatch) -> None:
     service = _service()
     service.embedding_context_length = 2
+    captured = _capture_embedding_input(monkeypatch)
 
-    captured: dict[str, str] = {}
-
-    async def fake_modern(self, query):  # noqa: ANN001
-        del self
-        captured["query"] = query
-        return [0.5, 0.6]
-
-    monkeypatch.setattr(type(service), "_embed_query_modern", fake_modern)
-    monkeypatch.setattr(type(service), "_embed_query_legacy", fake_modern)
-
-    vector = asyncio.run(service._embed_query("x" * 1000))
-    assert vector == [0.5, 0.6]
-    assert len(captured["query"]) == 128
+    asyncio.run(service._embed_query("x" * 1000))
+    assert len(captured["text"]) == 128
 
 
-def test_rag_retrieve_applies_min_score(monkeypatch) -> None:
+def test_rag_retrieve_applies_min_score(monkeypatch: pytest.MonkeyPatch) -> None:
     service = _service()
     service.min_score = 0.5
 
-    async def fake_embed_query(self, _: str):  # noqa: ANN001
-        del self
+    async def fake_embed_query(self: RagService, _: str) -> list[float]:
         return [0.1, 0.2, 0.3]
 
     class FakeClient:
-        def query_points(self, *, collection_name, query, query_filter, with_payload, limit):
+        def query_points(
+            self,
+            *,
+            collection_name: str,
+            query: object,
+            query_filter: object,
+            with_payload: bool,
+            limit: int,
+        ) -> SimpleNamespace:
             del collection_name, query, query_filter, with_payload, limit
             return SimpleNamespace(
                 points=[
@@ -263,7 +290,7 @@ def test_calibre_filter_always_includes_library_summary() -> None:
     service = _service()
     query_filter = service._build_collection_filter("calibre_books", "find me books on electronics")
     assert query_filter is not None
-    assert query_filter.must
+    assert isinstance(query_filter.must, list)
     condition = query_filter.must[0]
     match_any = getattr(condition, "match", None)
     values = getattr(match_any, "any", [])
@@ -274,7 +301,7 @@ def test_slack_filter_targets_channel_and_workspace_for_channel_queries() -> Non
     service = _service()
     query_filter = service._build_collection_filter("slack", "what channels should I join")
     assert query_filter is not None
-    assert query_filter.must
+    assert isinstance(query_filter.must, list)
     condition = query_filter.must[0]
     assert getattr(condition, "key", "") == "doc_type"
     match_any = getattr(condition, "match", None)
@@ -293,7 +320,7 @@ def test_events_filter_future_uses_start_time_range() -> None:
     service = _service()
     query_filter = service._build_collection_filter("events", "what upcoming events are next")
     assert query_filter is not None
-    assert query_filter.must
+    assert isinstance(query_filter.must, list)
     condition = query_filter.must[0]
     assert getattr(condition, "key", "") == "start_time"
     value_range = getattr(condition, "range", None)
@@ -304,6 +331,7 @@ def test_events_filter_prefers_event_summary_for_schedule_queries() -> None:
     service = _service()
     query_filter = service._build_collection_filter("events", "what is the regular schedule")
     assert query_filter is not None
+    assert isinstance(query_filter.must, list)
     keys = [getattr(item, "key", "") for item in query_filter.must]
     assert "record_type" in keys
     record_condition = next(
@@ -317,6 +345,7 @@ def test_events_filter_prefers_occurrence_for_specific_past_query() -> None:
     service = _service()
     query_filter = service._build_collection_filter("events", "what happened that tuesday")
     assert query_filter is not None
+    assert isinstance(query_filter.must, list)
     keys = [getattr(item, "key", "") for item in query_filter.must]
     assert "record_type" in keys
     record_condition = next(
@@ -341,13 +370,21 @@ def test_rag_expands_search_limit_when_min_score_enabled() -> None:
     captured: dict[str, int] = {}
 
     class FakeClient:
-        def query_points(self, *, collection_name, query, query_filter, with_payload, limit):
+        def query_points(
+            self,
+            *,
+            collection_name: str,
+            query: object,
+            query_filter: object,
+            with_payload: bool,
+            limit: int,
+        ) -> SimpleNamespace:
             del collection_name, query, query_filter, with_payload
             captured["limit"] = limit
             return SimpleNamespace(points=[])
 
     service._search_collection(
-        client=FakeClient(),
+        client=cast(QdrantClient, FakeClient()),
         collection="wiki",
         vector=[0.1, 0.2],
         query_filter=None,
@@ -362,13 +399,21 @@ def test_rag_uses_collection_specific_top_k_for_events() -> None:
     captured: dict[str, int] = {}
 
     class FakeClient:
-        def query_points(self, *, collection_name, query, query_filter, with_payload, limit):
+        def query_points(
+            self,
+            *,
+            collection_name: str,
+            query: object,
+            query_filter: object,
+            with_payload: bool,
+            limit: int,
+        ) -> SimpleNamespace:
             del collection_name, query, query_filter, with_payload
             captured["limit"] = limit
             return SimpleNamespace(points=[])
 
     service._search_collection(
-        client=FakeClient(),
+        client=cast(QdrantClient, FakeClient()),
         collection="events",
         vector=[0.1, 0.2],
         query_filter=None,
@@ -376,21 +421,27 @@ def test_rag_uses_collection_specific_top_k_for_events() -> None:
     assert captured["limit"] == 5
 
 
-def test_rag_reuses_single_qdrant_client(monkeypatch) -> None:
+def test_rag_reuses_single_qdrant_client(monkeypatch: pytest.MonkeyPatch) -> None:
     service = _service()
     calls = {"count": 0}
 
-    async def fake_embed_query(self, _: str):  # noqa: ANN001
-        del self
+    async def fake_embed_query(self: RagService, _: str) -> list[float]:
         return [0.1, 0.2, 0.3]
 
     class FakeClient:
-        def query_points(self, *, collection_name, query, query_filter, with_payload, limit):
+        def query_points(
+            self,
+            *,
+            collection_name: str,
+            query: object,
+            query_filter: object,
+            with_payload: bool,
+            limit: int,
+        ) -> SimpleNamespace:
             del collection_name, query, query_filter, with_payload, limit
             return SimpleNamespace(points=[SimpleNamespace(payload={"text": "ok"}, score=0.9)])
 
-    def fake_make_client(self):  # noqa: ANN001
-        del self
+    def fake_make_client(self: RagService) -> object:
         calls["count"] += 1
         return FakeClient()
 
@@ -399,23 +450,31 @@ def test_rag_reuses_single_qdrant_client(monkeypatch) -> None:
 
     first = asyncio.run(service.retrieve("one", enabled_collections=["wiki"]))
     second = asyncio.run(service.retrieve("two", enabled_collections=["wiki"]))
-    assert first and second
+    assert first
+    assert second
     assert calls["count"] == 1
 
 
-def test_rag_final_limit_sums_collection_specific_limits(monkeypatch) -> None:
+def test_rag_final_limit_sums_collection_specific_limits(monkeypatch: pytest.MonkeyPatch) -> None:
     service = _service()
     service.collections = ["events", "slack_general"]
     service.top_k = 2
     service.top_k_events = 3
     service.top_k_slack = 3
 
-    async def fake_embed_query(self, _: str):  # noqa: ANN001
-        del self
+    async def fake_embed_query(self: RagService, _: str) -> list[float]:
         return [0.1, 0.2, 0.3]
 
     class FakeClient:
-        def query_points(self, *, collection_name, query, query_filter, with_payload, limit):
+        def query_points(
+            self,
+            *,
+            collection_name: str,
+            query: object,
+            query_filter: object,
+            with_payload: bool,
+            limit: int,
+        ) -> SimpleNamespace:
             del query, query_filter, with_payload, limit
             return SimpleNamespace(
                 points=[

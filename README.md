@@ -1,99 +1,146 @@
 # Chat Hacksman
 
-Web-based chatbot with:
+[![CI](https://github.com/romkey/pdxhackerspace-chat-hacksman/actions/workflows/ci.yaml/badge.svg)](https://github.com/romkey/pdxhackerspace-chat-hacksman/actions/workflows/ci.yaml)
+[![Lint](https://github.com/romkey/pdxhackerspace-chat-hacksman/actions/workflows/lint.yaml/badge.svg)](https://github.com/romkey/pdxhackerspace-chat-hacksman/actions/workflows/lint.yaml)
+[![Python 3.15](https://img.shields.io/badge/python-3.15-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-- Optional RAG from up to 5 Qdrant collections (or none, if unset).
-- Configurable prompt/model/provider in the UI, persisted across runs.
-- Per-collection Qdrant enable/disable checkboxes in the UI, persisted across runs.
-- Topic buttons loaded from a JSON feed (default: `https://members.pdxhackerspace.org/rag.json`).
-- If feed includes `events` (for example `https://events.pdxhackerspace.org/events.json`), events are persisted in SQLite.
-- If feed includes `occurrences`, those are persisted too.
-- Ollama and llama.cpp-compatible chat modes.
-- History tracking for settings snapshot, prompt, question, and response.
-- Feedback tracking with thumbs up/down and optional notes.
-- Docker, GitHub Actions CI, and image publishing.
+A web chatbot for PDX Hackerspace members. It answers with a local LLM
+(Ollama or llama.cpp) and can ground its answers in up to five Qdrant
+collections (wiki, events, Slack, Calibre books...), embedding each
+question with any OpenAI-compatible embeddings API. Topic buttons, the
+events feed, chat history and thumbs-up/down feedback are kept in SQLite.
 
-## Quick Start (Local)
+> **AI disclosure:** This project was written by AI under human oversight,
+> following [these rules](https://github.com/romkey/python-ai-rules/blob/main/RULES.md).
 
-1. Create env file:
+## What's here
 
-   ```bash
-   cp .env.example .env
-   ```
+| Path | What it is |
+|------|------------|
+| `src/chat_hacksman/__main__.py` | The `chat-hacksman` command: reads settings, starts uvicorn |
+| `src/chat_hacksman/config.py` | `Settings` from environment variables; embedding query prefixes |
+| `src/chat_hacksman/server.py` | The FastAPI app (`create_app`) and its HTTP API |
+| `src/chat_hacksman/rag.py` | Embeds questions and searches Qdrant, with per-collection filters |
+| `src/chat_hacksman/llm.py` | Builds the prompt and calls Ollama or llama.cpp, with retries |
+| `src/chat_hacksman/storage.py` | SQLite: settings, history, feedback, events, LLM server status |
+| `src/chat_hacksman/topics.py` | Fetches and caches the topics/events feed |
+| `src/chat_hacksman/models.py` | Pydantic request/response models |
+| `src/chat_hacksman/static/` | The browser UI |
+| `tests/` | pytest tests |
+| `docs/configuration.md` | Every environment variable |
 
-2. Install and run:
+## Technical details
 
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -e ".[dev]"
-   python -m app.main
-   ```
+A question goes through these steps:
 
-3. Open `http://localhost:8000`.
+1. **Embed.** If RAG is on and collections are enabled, the question
+   (with the model's query prefix, e.g. `search_query: ` for the default
+   `nomic-ai/modernbert-embed-base`) is sent to
+   `POST {EMBEDDING_URL}/embeddings`. Any OpenAI-compatible server works:
+   OpenAI, Hugging Face TEI, Infinity, vLLM, llama.cpp's `llama-server`, or
+   Ollama's `/v1` API. Use the same model and prefixes the collections were
+   ingested with; [docs/configuration.md](docs/configuration.md#embeddings)
+   lists the prefixes for common models.
+2. **Search.** Each enabled Qdrant collection is searched, skipping any
+   whose vector size doesn't match. Collections named `events*`, `slack*`
+   and `calibre*` get filters picked from the question's wording (upcoming
+   vs. past events, channel vs. thread summaries, catalog vs. passages).
+   Hits below `RAG_MIN_SCORE` are dropped. Schedule questions with no
+   event hits fall back to upcoming events from the feed.
+3. **Answer.** The chunks go into the system prompt and the question to
+   the chat model: Ollama's `POST /api/chat`, or llama.cpp's
+   OpenAI-compatible `POST /v1/chat/completions`.
+4. **Record.** The question, answer, settings and timings are saved to
+   history unless it's a temporary chat.
 
-## Environment Variables
+If Qdrant or the embedding server is unreachable, the chat still works
+without RAG.
 
-See `.env.example`. Key vars:
+HTTP API (all under optional basic auth except the health checks):
 
-- `RAG_COLLECTIONS` as a comma-separated list, or `RAG_COLLECTION_1..5`.
-- `RAG_TOP_K` and `RAG_MIN_SCORE` tune retrieval breadth and minimum similarity.
-- `RAG_TOP_K_EVENTS`, `RAG_TOP_K_SLACK`, `RAG_TOP_K_CALIBRE` tune per-collection retrieval
-  breadth before final cross-collection merge/trim.
-- `RAG_TOPICS_URL` for topic feed buttons.
-- `GET /api/events` returns stored events from the feed.
-- `GET /api/occurrences` returns stored occurrences from the feed.
-- `DEFAULT_PROVIDER` (`ollama` or `llama_cpp`).
-- `DEFAULT_LLM_BASE_URL`, `DEFAULT_MODEL`, `DEFAULT_SYSTEM_PROMPT`.
-- `OLLAMA_API_KEY` to send an optional bearer token to Ollama chat, model, pull, and
-  embedding endpoints.
-- `BASIC_AUTH_USERNAME` and `BASIC_AUTH_PASSWORD` to enable optional HTTP basic auth.
-- `SENTRY_DSN` to enable Sentry error reporting.
-- `EMBEDDING_TIMEOUT_SECONDS` for embedding calls used by RAG lookup.
-- `EMBEDDING_CONTEXT_LENGTH` to cap embedding input size; overly long questions are truncated before embedding.
-- `LLM_TIMEOUT_SECONDS`, `LLM_RETRY_ATTEMPTS`, `LLM_RETRY_BACKOFF_SECONDS` to handle transient model server disconnects/timeouts.
-- `LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, ...).
+| Endpoint | What it does |
+|----------|--------------|
+| `GET /healthz`, `GET /health` | Health check (`/healthz` includes the version) |
+| `GET /`, `/static/...` | The UI |
+| `POST /api/chat` | Ask a question: `{"question", "use_rag", "temporary_chat"}` |
+| `GET`/`PUT /api/settings` | Provider, model, system prompt, tweaks, enabled collections |
+| `GET /api/rag/collections` | Configured and enabled collections |
+| `GET /api/models`, `POST /api/models/pull` | List or pull Ollama models |
+| `GET /api/llm-base-urls`, `GET /api/llm-base-urls/status` | LLM servers used, and whether they're up |
+| `GET /api/topics`, `/api/events`, `/api/occurrences` | The topics feed and stored events |
+| `GET`/`DELETE /api/history`, `DELETE /api/history/latest` | Chat history |
+| `GET`/`POST /api/feedback` | Thumbs up/down with notes |
+| `GET /api/meta` | Name, version, repo link |
 
-If Qdrant collections are not configured or embedding lookup fails, RAG is skipped gracefully.
+The UI offers shared tweaks (`temperature`, `top_p`, `max_tokens`,
+`repeat_penalty`), plus `num_ctx` for Ollama and `seed` for llama.cpp.
 
-For ebook retrieval in `calibre_books`, text is read from `chunk_text` (with fallback keys for other
-collections), retrieval supports both Ollama `/api/embed` and `/api/embeddings`, and `library_summary`
-chunks are always eligible for retrieval.
+## Running it
 
-## Provider Notes
-
-- `ollama` mode uses `POST /api/chat`.
-- `llama_cpp` mode uses OpenAI-compatible `POST /v1/chat/completions`.
-
-The UI exposes shared controls (`temperature`, `top_p`, `max_tokens`, `repeat_penalty`) plus:
-
-- Ollama-specific: `num_ctx`
-- llama.cpp-specific: `seed`
-
-## Docker
-
-Build and run:
-
-```bash
-docker build -t chat-hacksman:local .
-docker run --rm -p 8000:8000 --env-file .env chat-hacksman:local
-```
-
-Compose example:
-
-```bash
-cp docker-compose.example.yml docker-compose.yml
-docker compose up --build
-```
-
-## Lint and Tests
+Requires Docker. Configuration comes from environment variables, kept in
+`.env` (see [docs/configuration.md](docs/configuration.md)):
 
 ```bash
-ruff check .
-pytest -q
+cp .env.example .env   # then edit it
+docker compose -f docker-compose.prod.yaml up -d
 ```
 
-## GitHub Actions
+That runs the latest release from
+`ghcr.io/romkey/pdxhackerspace-chat-hacksman`; set `APP_VERSION=X.Y.Z` to
+pin one. The database is kept in the `chat-hacksman-data` volume. The app
+answers on http://localhost:8000.
 
-- `.github/workflows/ci.yml` runs lint + tests on PRs and pushes to `main`.
-- `.github/workflows/docker-publish.yml` builds/pushes to GHCR with BuildKit cache (`type=gha`).
+### With pip
+
+Needs Python 3.15 or newer. Install into a virtual environment, from a
+release's wheel:
+
+```bash
+python3 -m venv ~/.venvs/chat-hacksman
+~/.venvs/chat-hacksman/bin/pip install https://github.com/romkey/pdxhackerspace-chat-hacksman/releases/download/vX.Y.Z/chat_hacksman-X.Y.Z-py3-none-any.whl
+~/.venvs/chat-hacksman/bin/chat-hacksman --version
+```
+
+Set its environment variables yourself (see
+[docs/configuration.md](docs/configuration.md)); it doesn't read `.env`.
+It listens on 127.0.0.1 unless you set `APP_HOST`.
+
+## Development
+
+With Docker, nothing else to install:
+
+```bash
+docker compose up --build                                  # run from the working tree
+docker compose -f docker-compose.test.yaml run --rm test   # tests with coverage
+docker compose -f docker-compose.lint.yaml run --rm lint   # every lint check, as CI runs them
+```
+
+With [uv](https://docs.astral.sh/uv/), which installs the exact versions
+CI tests (`uv.lock`):
+
+```bash
+uv sync
+uv run pytest
+uv run mypy
+uv run chat-hacksman
+```
+
+With pip (25.1 or newer, for `--group`). pip doesn't read `uv.lock`, so it
+may pick newer dependency versions than CI tested:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e . --group dev
+pytest
+mypy
+chat-hacksman
+```
+
+Either way, `uvx pre-commit install` (or `pip install pre-commit &&
+pre-commit install`) runs the lint checks on every commit.
+
+## License
+
+[MIT](LICENSE)

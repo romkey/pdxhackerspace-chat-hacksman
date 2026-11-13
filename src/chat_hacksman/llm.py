@@ -1,13 +1,13 @@
-from __future__ import annotations
-
 import asyncio
 from dataclasses import dataclass
 from time import perf_counter
+
+# Any: Ollama and llama.cpp responses are untyped JSON.
 from typing import Any
 
 import httpx
 
-from app.models import AppSettings, ContextChunk
+from chat_hacksman.models import AppSettings, ContextChunk
 
 
 class LlmError(RuntimeError):
@@ -27,8 +27,8 @@ class LlmResult:
 
 def _is_slack_collection(collection: str) -> bool:
     normalized = collection.strip().lower()
-    return normalized == "slack" or normalized.startswith("slack_") or normalized.startswith(
-        "slack-"
+    return (
+        normalized == "slack" or normalized.startswith("slack_") or normalized.startswith("slack-")
     )
 
 
@@ -237,11 +237,7 @@ def _build_system_prompt(base_prompt: str, context: list[ContextChunk]) -> str:
             "Note that event information is periodically synchronized and may not reflect very "
             "recent changes - direct members to the source URL to confirm details."
         )
-    return (
-        f"{base_prompt}\n\n"
-        f"{guidance}\n\n"
-        f"Retrieved context:\n{context_block}"
-    )
+    return f"{base_prompt}\n\n{guidance}\n\nRetrieved context:\n{context_block}"
 
 
 def _ns_to_ms(value: Any) -> float | None:

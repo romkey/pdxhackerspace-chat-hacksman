@@ -1,8 +1,8 @@
-from __future__ import annotations
-
 import logging
 from dataclasses import dataclass, field
 from time import monotonic
+
+# Any: the topics feed is untyped JSON.
 from typing import Any
 
 import httpx

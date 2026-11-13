@@ -1,24 +1,24 @@
-from __future__ import annotations
-
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+
+# Any: Qdrant payloads and collection info are untyped JSON / loosely typed objects.
 from typing import Any
 
 import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
-from qdrant_client.http.models import DatetimeRange, FieldCondition, Filter, MatchAny
+from qdrant_client.http.models import Condition, DatetimeRange, FieldCondition, Filter, MatchAny
 
-from app.models import ContextChunk
+from chat_hacksman.models import ContextChunk
 
 logger = logging.getLogger(__name__)
 
 
 def _is_slack_collection(collection: str) -> bool:
     normalized = collection.strip().lower()
-    return normalized == "slack" or normalized.startswith("slack_") or normalized.startswith(
-        "slack-"
+    return (
+        normalized == "slack" or normalized.startswith("slack_") or normalized.startswith("slack-")
     )
 
 
@@ -114,60 +114,49 @@ class RagService:
     embedding_context_length: int = 8192
     embedding_timeout_seconds: float = 30.0
     min_score: float = 0.0
-    ollama_api_key: str | None = None
+    embedding_api_key: str | None = None
+    embedding_query_prefix: str = ""
     _collection_vector_dims: dict[str, int | None] = field(default_factory=dict)
     _client: QdrantClient | None = None
 
     def _make_qdrant_client(self) -> QdrantClient:
-        return QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key, timeout=5.0)
+        return QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key, timeout=5)
 
     def _get_qdrant_client(self) -> QdrantClient:
         if self._client is None:
             self._client = self._make_qdrant_client()
         return self._client
 
-    async def _embed_query_modern(self, query: str) -> list[float] | None:
-        async with httpx.AsyncClient(timeout=self.embedding_timeout_seconds) as client:
-            kwargs: dict[str, Any] = {}
-            headers = _bearer_auth_headers(self.ollama_api_key)
-            if headers:
-                kwargs["headers"] = headers
-            response = await client.post(
-                f"{self.embedding_url.rstrip('/')}/api/embed",
-                json={"model": self.embedding_model, "input": [query]},
-                **kwargs,
-            )
-            response.raise_for_status()
-            data = response.json()
-        embeddings = data.get("embeddings")
-        if isinstance(embeddings, list) and embeddings and isinstance(embeddings[0], list):
-            logger.info("Embedding generated via /api/embed with %d dimensions", len(embeddings[0]))
-            return [float(x) for x in embeddings[0]]
-        return None
+    async def _request_embedding(self, text: str) -> list[float] | None:
+        """One embedding from an OpenAI-compatible POST /embeddings endpoint.
 
-    async def _embed_query_legacy(self, query: str) -> list[float] | None:
+        API: https://platform.openai.com/docs/api-reference/embeddings/create
+        """
         async with httpx.AsyncClient(timeout=self.embedding_timeout_seconds) as client:
-            kwargs: dict[str, Any] = {}
-            headers = _bearer_auth_headers(self.ollama_api_key)
-            if headers:
-                kwargs["headers"] = headers
             response = await client.post(
-                f"{self.embedding_url.rstrip('/')}/api/embeddings",
-                json={"model": self.embedding_model, "prompt": query},
-                **kwargs,
+                f"{self.embedding_url.rstrip('/')}/embeddings",
+                json={
+                    "model": self.embedding_model,
+                    "input": [text],
+                    "encoding_format": "float",
+                },
+                headers=_bearer_auth_headers(self.embedding_api_key),
             )
             response.raise_for_status()
             data = response.json()
-        embedding = data.get("embedding")
-        if isinstance(embedding, list) and embedding:
-            logger.info(
-                "Embedding generated via /api/embeddings with %d dimensions", len(embedding)
-            )
-            return [float(x) for x in embedding]
-        return None
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+            return None
+        embedding = items[0].get("embedding")
+        if not isinstance(embedding, list) or not embedding:
+            return None
+        logger.info("Embedding generated with %d dimensions", len(embedding))
+        return [float(x) for x in embedding]
 
     def _truncate_query_for_embedding(self, query: str) -> str:
-        limit = max(1, int(self.embedding_context_length))
+        # Leave room for the query prefix, which must never be cut off.
+        prefix_tokens = len(self.embedding_query_prefix.split())
+        limit = max(1, int(self.embedding_context_length) - prefix_tokens)
         max_chars = max(128, limit * 4)
         normalized = query.strip()
         if not normalized:
@@ -199,41 +188,26 @@ class RagService:
         return normalized
 
     async def _embed_query(self, query: str) -> list[float] | None:
+        embedding_input = self.embedding_query_prefix + self._truncate_query_for_embedding(query)
+        logger.info(
+            "Creating embedding for query using model=%s at %s",
+            self.embedding_model,
+            self.embedding_url,
+        )
         try:
-            embedding_query = self._truncate_query_for_embedding(query)
-            logger.info(
-                "Creating embedding for query using model=%s at %s",
-                self.embedding_model,
-                self.embedding_url,
-            )
-            modern_embedding: list[float] | None = None
-            try:
-                modern_embedding = await self._embed_query_modern(embedding_query)
-            except Exception as exc:
-                logger.warning(
-                    "Modern embed request failed url=%s/api/embed model=%s error_type=%s error=%s",
-                    self.embedding_url.rstrip("/"),
-                    self.embedding_model,
-                    type(exc).__name__,
-                    exc,
-                )
-            if modern_embedding is not None:
-                return modern_embedding
-            logger.warning("Trying legacy embed endpoint /api/embeddings")
-            legacy_embedding = await self._embed_query_legacy(embedding_query)
-            if legacy_embedding is not None:
-                return legacy_embedding
-            logger.warning("Embedding response had no usable vector payload")
-        except Exception as exc:
+            embedding = await self._request_embedding(embedding_input)
+        except (httpx.HTTPError, ValueError) as exc:
             logger.warning(
-                "Embedding request failed url=%s model=%s error_type=%s error=%s",
+                "Embedding request failed url=%s/embeddings model=%s error_type=%s error=%s",
                 self.embedding_url.rstrip("/"),
                 self.embedding_model,
                 type(exc).__name__,
                 exc,
             )
             return None
-        return None
+        if embedding is None:
+            logger.warning("Embedding response had no usable vector payload")
+        return embedding
 
     def _search_collection(
         self,
@@ -337,14 +311,14 @@ class RagService:
         now_words = {"now", "today", "current", "happening", "ongoing"}
         summary_words = {"often", "frequency", "recurring", "regular", "schedule", "series"}
         occurrence_words = {"happened", "specific", "that", "tuesday", "week"}
-        now_iso = datetime.now(tz=UTC).isoformat()
+        now = datetime.now(tz=UTC)
 
-        must: list[FieldCondition] = []
+        must: list[Condition] = []
         if tokens & future_words:
             must.append(
                 FieldCondition(
                     key="start_time",
-                    range=DatetimeRange(gte=now_iso),
+                    range=DatetimeRange(gte=now),
                 )
             )
         elif tokens & now_words:
@@ -358,7 +332,7 @@ class RagService:
             must.append(
                 FieldCondition(
                     key="start_time",
-                    range=DatetimeRange(lt=now_iso),
+                    range=DatetimeRange(lt=now),
                 )
             )
 

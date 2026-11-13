@@ -1,11 +1,32 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Tool caches and reports
+.mypy_cache/
 .pytest_cache/
 .ruff_cache/
-.DS_Store
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Secrets: real configuration lives in .env, never in the repo
 .env
-dist/
-build/
-*.egg-info/
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# Editors
+*~
+.vscode/
+.idea/
+
+# App data (SQLite database)
 data/
