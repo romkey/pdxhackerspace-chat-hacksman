@@ -7,6 +7,8 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-13
+
 ### Added
 
 - Optional reranking after the vector search: with `RERANK_URL` set, each
