@@ -7,8 +7,20 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+### Added
+
+- Optional reranking after the vector search: with `RERANK_URL` set, each
+  collection is searched for `RERANK_CANDIDATES` chunks, a cross-encoder
+  reranker (default `BAAI/bge-reranker-v2-m3`) scores them against the
+  question, and the best `RERANK_TOP_N` go to the LLM. Speaks the
+  Jina/Cohere rerank API (llama.cpp, vLLM, Infinity, Jina, Cohere) and
+  Hugging Face TEI's (`RERANK_API=tei`). Falls back to vector order if the
+  reranker fails. Chat responses' context chunks gain `rerank_score`.
+
 ### Fixed
 
+- A Qdrant error other than a vector size mismatch no longer reuses the
+  previous collection's hits (or fails) for that collection.
 - The Release workflow no longer fails to push the image after a release
   PR is merged: it wrote the build cache from the closed PR's event, which
   isn't allowed.

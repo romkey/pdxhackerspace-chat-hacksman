@@ -10,9 +10,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from chat_hacksman.rerank import RERANK_APIS, RerankApi
+
 PROVIDERS = ("ollama", "llama_cpp")
 
 DEFAULT_EMBEDDING_MODEL = "nomic-ai/modernbert-embed-base"
+DEFAULT_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
 
 # Query prefixes for the embedding models we know, matched by name (case
 # ignored, with or without the "org/" part). Taken from each model card on
@@ -107,6 +110,26 @@ def _url(env: Mapping[str, str], name: str, default: str) -> str:
     return value.rstrip("/")
 
 
+def _optional_url(env: Mapping[str, str], name: str) -> str | None:
+    return _url(env, name, "") if env.get(name, "").strip() else None
+
+
+def _optional_int(env: Mapping[str, str], name: str, minimum: int) -> int | None:
+    return _int(env, name, 0, minimum=minimum) if env.get(name, "").strip() else None
+
+
+def _optional_float(env: Mapping[str, str], name: str) -> float | None:
+    return _float(env, name, 0.0, minimum=float("-inf")) if env.get(name, "").strip() else None
+
+
+def _rerank_api(env: Mapping[str, str]) -> RerankApi:
+    value = env.get("RERANK_API", "").strip().lower() or "jina"
+    for api in RERANK_APIS:
+        if value == api:
+            return api
+    raise ConfigError(f"RERANK_API must be one of {', '.join(RERANK_APIS)}, not {value!r}")
+
+
 def _split_collections(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
@@ -134,6 +157,15 @@ class Settings:
     embedding_query_prefix: str = _NOMIC_QUERY_PREFIX
     embedding_context_length: int = 8192
     embedding_timeout_seconds: float = 30.0
+    rerank_url: str | None = None
+    rerank_api: RerankApi = "jina"
+    rerank_api_key: str | None = None
+    rerank_model: str = DEFAULT_RERANK_MODEL
+    rerank_candidates: int = 10
+    rerank_top_n: int | None = None
+    rerank_min_score: float | None = None
+    rerank_context_length: int = 8192
+    rerank_timeout_seconds: float = 30.0
     llm_timeout_seconds: float = 180.0
     llm_retry_attempts: int = 2
     llm_retry_backoff_seconds: float = 0.5
@@ -215,6 +247,19 @@ class Settings:
             ),
             embedding_timeout_seconds=_float(
                 env, "EMBEDDING_TIMEOUT_SECONDS", cls.embedding_timeout_seconds
+            ),
+            rerank_url=_optional_url(env, "RERANK_URL"),
+            rerank_api=_rerank_api(env),
+            rerank_api_key=_optional(env, "RERANK_API_KEY"),
+            rerank_model=env.get("RERANK_MODEL", "").strip() or cls.rerank_model,
+            rerank_candidates=_int(env, "RERANK_CANDIDATES", cls.rerank_candidates, minimum=1),
+            rerank_top_n=_optional_int(env, "RERANK_TOP_N", minimum=1),
+            rerank_min_score=_optional_float(env, "RERANK_MIN_SCORE"),
+            rerank_context_length=_int(
+                env, "RERANK_CONTEXT_LENGTH", cls.rerank_context_length, minimum=1
+            ),
+            rerank_timeout_seconds=_float(
+                env, "RERANK_TIMEOUT_SECONDS", cls.rerank_timeout_seconds
             ),
             llm_timeout_seconds=_float(env, "LLM_TIMEOUT_SECONDS", cls.llm_timeout_seconds),
             llm_retry_attempts=_int(env, "LLM_RETRY_ATTEMPTS", cls.llm_retry_attempts),

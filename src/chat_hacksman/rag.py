@@ -11,6 +11,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.http.models import Condition, DatetimeRange, FieldCondition, Filter, MatchAny
 
 from chat_hacksman.models import ContextChunk
+from chat_hacksman.rerank import Reranker
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,14 @@ class RagService:
     min_score: float = 0.0
     embedding_api_key: str | None = None
     embedding_query_prefix: str = ""
+    # With a reranker, each collection is searched for rerank_candidates
+    # chunks (at least its top_k), all of them are reranked together, and
+    # the best rerank_top_n (default: the sum of the collections' top_k) at
+    # or above rerank_min_score are kept.
+    reranker: Reranker | None = None
+    rerank_candidates: int = 10
+    rerank_top_n: int | None = None
+    rerank_min_score: float | None = None
     _collection_vector_dims: dict[str, int | None] = field(default_factory=dict)
     _client: QdrantClient | None = None
 
@@ -218,6 +227,8 @@ class RagService:
         query_filter: Filter | None = None,
     ) -> list[Any]:
         target_top_k = self._top_k_for_collection(collection)
+        if self.reranker is not None:
+            target_top_k = max(target_top_k, self.rerank_candidates)
         search_limit = target_top_k * 2 if self.min_score > 0 else target_top_k
         if hasattr(client, "search"):
             try:
@@ -505,6 +516,7 @@ class RagService:
                     type(exc).__name__,
                     exc,
                 )
+                continue
             except Exception as exc:
                 logger.warning(
                     "Qdrant search failed collection=%s error_type=%s error=%s",
@@ -537,5 +549,28 @@ class RagService:
         if final_limit <= 0:
             final_limit = max(1, self.top_k)
         out.sort(key=lambda item: item.score, reverse=True)
+        if self.reranker is not None and out:
+            reranked = await self._rerank(self.reranker, query, out, final_limit)
+            if reranked is not None:
+                logger.info("RAG retrieval produced %d reranked chunks", len(reranked))
+                return reranked
+            logger.warning("Reranking failed; using vector search order")
         logger.info("RAG retrieval produced %d usable chunks", len(out[:final_limit]))
         return out[:final_limit]
+
+    async def _rerank(
+        self, reranker: Reranker, query: str, chunks: list[ContextChunk], final_limit: int
+    ) -> list[ContextChunk] | None:
+        """The chunks most relevant to the query by rerank score, or None if
+        the reranker failed."""
+        scores = await reranker.rerank(query, [chunk.text for chunk in chunks])
+        if scores is None:
+            return None
+        scored = [
+            chunk.model_copy(update={"rerank_score": score})
+            for chunk, score in zip(chunks, scores, strict=True)
+            if self.rerank_min_score is None or score >= self.rerank_min_score
+        ]
+        # Stable sort: equal rerank scores keep their vector-score order.
+        scored.sort(key=lambda chunk: chunk.rerank_score or 0.0, reverse=True)
+        return scored[: self.rerank_top_n or final_limit]
