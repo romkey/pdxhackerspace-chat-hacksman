@@ -430,7 +430,9 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         except LlmError as exc:
             logger.warning("Failed to list models url=%s error=%s", config.llm_url, exc)
             return ModelsResponse(default_model=config.llm_model, models=[], error=str(exc))
-        return ModelsResponse(default_model=config.llm_model, models=models)
+        return ModelsResponse(
+            default_model=config.llm_model, models=sorted(models, key=str.casefold)
+        )
 
     @app.get("/api/topics")
     async def get_topics() -> dict[str, list[str]]:

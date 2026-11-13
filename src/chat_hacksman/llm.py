@@ -277,7 +277,7 @@ class LlmService:
         return f"{self.base_url.rstrip('/')}/{path}"
 
     async def list_models(self) -> list[str]:
-        """Model ids from GET {base_url}/models, sorted. Raises LlmError."""
+        """Model ids from GET {base_url}/models, in the server's order. Raises LlmError."""
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
@@ -295,7 +295,7 @@ class LlmService:
             for item in items
             if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip()
         ]
-        return sorted(dict.fromkeys(names), key=str.casefold)
+        return list(dict.fromkeys(names))
 
     async def resolve_model(self, model: str) -> str:
         """The model to send: the saved one, else LLM_MODEL, else the server's first."""

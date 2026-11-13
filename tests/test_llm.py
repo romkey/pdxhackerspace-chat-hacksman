@@ -270,6 +270,16 @@ def test_no_model_configured_uses_the_servers_first(mock_http: Callable[[Handler
     assert seen == ["/v1/models", "/v1/chat/completions"]
 
 
+def test_fallback_model_is_the_servers_first_not_alphabetical_first(
+    mock_http: Callable[[Handler], None],
+) -> None:
+    models = {"data": [{"id": "zeta-chat"}, {"id": "alpha-embed"}, {"id": "zeta-chat"}]}
+    mock_http(lambda request: httpx.Response(200, json=models))
+    service = LlmService(base_url="http://llm.local/v1")
+    assert asyncio.run(service.list_models()) == ["zeta-chat", "alpha-embed"]
+    assert asyncio.run(service.resolve_model("")) == "zeta-chat"
+
+
 def test_no_model_anywhere_is_an_error(mock_http: Callable[[Handler], None]) -> None:
     mock_http(lambda request: httpx.Response(200, json={"data": []}))
     service = LlmService(base_url="http://llm.local/v1")
