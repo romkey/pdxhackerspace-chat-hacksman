@@ -7,6 +7,8 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-13
+
 ### Changed
 
 - **Breaking:** The chat LLM is any OpenAI-compatible chat completions API
