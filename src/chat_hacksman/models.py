@@ -5,34 +5,29 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-ProviderName = Literal["ollama", "llama_cpp"]
 
+class SamplingTweaks(BaseModel):
+    """Sampling options sent with each chat request (OpenAI parameter names)."""
 
-class ProviderTweaks(BaseModel):
     max_tokens: int = Field(default=512, ge=1, le=4096)
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
-    num_ctx: int = Field(default=4096, ge=256, le=32768)
-    repeat_penalty: float = Field(default=1.1, ge=0.0, le=3.0)
     seed: int | None = None
 
 
 class AppSettings(BaseModel):
-    provider: ProviderName = "ollama"
-    llm_base_url: str = "http://localhost:11434"
-    model: str = "llama3.2:latest"
+    # Empty means LLM_MODEL (or the server's first model if that's unset).
+    model: str = ""
     system_prompt: str
     enabled_rag_collections: list[str] = Field(default_factory=list)
-    tweaks: ProviderTweaks = Field(default_factory=ProviderTweaks)
+    tweaks: SamplingTweaks = Field(default_factory=SamplingTweaks)
 
 
 class SettingsUpdate(BaseModel):
-    provider: ProviderName
-    llm_base_url: str
-    model: str
+    model: str = Field(default="", max_length=200)
     system_prompt: str
     enabled_rag_collections: list[str] = Field(default_factory=list)
-    tweaks: ProviderTweaks
+    tweaks: SamplingTweaks
 
 
 class RagCollectionsResponse(BaseModel):
@@ -41,36 +36,17 @@ class RagCollectionsResponse(BaseModel):
 
 
 class ModelsResponse(BaseModel):
-    provider: ProviderName
+    # What an empty AppSettings.model resolves to (LLM_MODEL), if set.
+    default_model: str
     models: list[str]
     error: str | None = None
 
 
-class LlmBaseUrlsResponse(BaseModel):
-    urls: list[str]
-
-
-class LlmBaseUrlStatusRecord(BaseModel):
+class LlmStatusResponse(BaseModel):
     url: str
     available: bool
     last_changed_at: datetime
     last_checked_at: datetime
-
-
-class LlmBaseUrlStatusesResponse(BaseModel):
-    items: list[LlmBaseUrlStatusRecord]
-
-
-class ModelPullRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    provider: ProviderName | None = None
-    base_url: str | None = None
-
-
-class ModelPullResponse(BaseModel):
-    provider: ProviderName
-    pulled_model: str
-    status: str
 
 
 class MetaResponse(BaseModel):

@@ -2,7 +2,7 @@
 
 **What:** a web chatbot for hackerspace members, with optional RAG over Qdrant.
 **Runs as:** HTTP service (FastAPI + uvicorn) on port 8000; `chat-hacksman`.
-**Talks to:** Ollama or llama.cpp (chat), an OpenAI-compatible embeddings
+**Talks to:** an OpenAI-compatible chat API (`LLM_URL`), an OpenAI-compatible embeddings
 API, an optional reranker, Qdrant, the topics/events JSON feed, SQLite (local file), optionally Sentry.
 
 ## Files
@@ -12,7 +12,7 @@ API, an optional reranker, Qdrant, the topics/events JSON feed, SQLite (local fi
 - `src/chat_hacksman/server.py`: `create_app(settings)`; every HTTP endpoint.
 - `src/chat_hacksman/rag.py`: `RagService`: embed the question, search and filter Qdrant, rerank.
 - `src/chat_hacksman/rerank.py`: `Reranker`: rerank API client (Jina/Cohere or TEI format).
-- `src/chat_hacksman/llm.py`: `LlmService`: system prompt from chunks, Ollama/llama.cpp calls.
+- `src/chat_hacksman/llm.py`: `LlmService`: system prompt from chunks, OpenAI-style chat completions.
 - `src/chat_hacksman/storage.py`: `Storage`: SQLite schema and queries.
 - `src/chat_hacksman/topics.py`: `TopicsService`: fetch and cache the feed.
 - `src/chat_hacksman/models.py`: pydantic models for the API.

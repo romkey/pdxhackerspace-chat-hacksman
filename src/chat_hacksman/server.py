@@ -36,15 +36,10 @@ from chat_hacksman.models import (
     FeedbackCreateRequest,
     FeedbackRecord,
     HistoryRecord,
-    LlmBaseUrlsResponse,
-    LlmBaseUrlStatusesResponse,
-    LlmBaseUrlStatusRecord,
+    LlmStatusResponse,
     MetaResponse,
-    ModelPullRequest,
-    ModelPullResponse,
     ModelsResponse,
     OccurrenceRecord,
-    ProviderName,
     RagCollectionsResponse,
     SettingsUpdate,
 )
@@ -72,14 +67,10 @@ class Services:
 
 def build_services(settings: Settings) -> Services:
     default_settings = AppSettings(
-        provider=_provider_name(settings.default_provider),
-        llm_base_url=settings.default_llm_base_url,
-        model=settings.default_model,
         system_prompt=settings.default_system_prompt,
         enabled_rag_collections=list(settings.rag_collections),
     )
     storage = Storage(db_path=settings.db_path, default_settings=default_settings)
-    storage.remember_llm_base_url(default_settings.llm_base_url)
     return Services(
         settings=settings,
         storage=storage,
@@ -105,10 +96,12 @@ def build_services(settings: Settings) -> Services:
             rerank_min_score=settings.rerank_min_score,
         ),
         llm=LlmService(
+            base_url=settings.llm_url,
+            api_key=settings.llm_api_key,
+            default_model=settings.llm_model,
             request_timeout_seconds=settings.llm_timeout_seconds,
             retry_attempts=settings.llm_retry_attempts,
             retry_backoff_seconds=settings.llm_retry_backoff_seconds,
-            ollama_api_key=settings.ollama_api_key,
         ),
     )
 
@@ -125,12 +118,6 @@ def build_reranker(settings: Settings) -> Reranker | None:
         timeout_seconds=settings.rerank_timeout_seconds,
         context_length=settings.rerank_context_length,
     )
-
-
-def _provider_name(value: str) -> ProviderName:
-    if value == "llama_cpp":
-        return "llama_cpp"
-    return "ollama"
 
 
 def _client_ip_from_request(request: Request) -> str:
@@ -150,7 +137,7 @@ def _client_ip_from_request(request: Request) -> str:
     return "unknown"
 
 
-def _resolve_provider_ip(base_url: str) -> str:
+def _resolve_host_ip(base_url: str) -> str:
     hostname = urlparse(base_url).hostname or ""
     if not hostname:
         return "unknown"
@@ -164,8 +151,9 @@ def _bearer_headers(api_key: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
 
-async def _check_provider_availability(base_url: str, api_key: str | None) -> bool:
-    url = base_url.rstrip("/") + "/"
+async def _check_llm_availability(base_url: str, api_key: str | None) -> bool:
+    """Whether the server answers GET {base_url}/models at all (any status)."""
+    url = base_url.rstrip("/") + "/models"
     try:
         async with httpx.AsyncClient(timeout=3.0, follow_redirects=True) as client:
             await client.get(url, headers=_bearer_headers(api_key))
@@ -308,6 +296,11 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         "Configured Qdrant collections: %s",
         ",".join(config.rag_collections) if config.rag_collections else "(none)",
     )
+    logger.info(
+        "Chat LLM at %s, default model=%s",
+        config.llm_url,
+        config.llm_model or "(the server's first)",
+    )
     if config.rerank_url:
         logger.info(
             "Reranking with model=%s at %s (api=%s)",
@@ -336,10 +329,6 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
     def available_collections(enabled: list[str]) -> list[str]:
         allowed = set(config.rag_collections)
         return [collection for collection in enabled if collection in allowed]
-
-    def target_provider(requested: str | None, fallback: ProviderName) -> ProviderName:
-        name = (requested or fallback).strip()
-        return _provider_name(name) if name in {"ollama", "llama_cpp"} else fallback
 
     @app.middleware("http")
     async def optional_basic_auth(
@@ -382,7 +371,6 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
     @app.get("/api/settings", response_model=AppSettings)
     async def get_settings() -> AppSettings:
         settings = storage.get_settings()
-        storage.remember_llm_base_url(settings.llm_base_url)
         if not settings.enabled_rag_collections and config.rag_collections:
             # Backward-compatible default for older stored settings payloads.
             settings.enabled_rag_collections = list(config.rag_collections)
@@ -394,61 +382,38 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         settings = AppSettings.model_validate(update.model_dump())
         settings.enabled_rag_collections = available_collections(settings.enabled_rag_collections)
         storage.save_settings(settings)
-        storage.remember_llm_base_url(settings.llm_base_url)
         logger.info(
-            "Saved settings provider=%s model=%s enabled_rag_collections=%s",
-            settings.provider,
-            settings.model,
+            "Saved settings model=%s enabled_rag_collections=%s",
+            settings.model or "(default)",
             ",".join(settings.enabled_rag_collections) or "(none)",
         )
         return settings
 
-    @app.get("/api/llm-base-urls", response_model=LlmBaseUrlsResponse)
-    async def get_llm_base_urls(
-        limit: int = Query(default=200, ge=1, le=1000),
-    ) -> LlmBaseUrlsResponse:
-        return LlmBaseUrlsResponse(urls=storage.get_llm_base_urls(limit=limit))
-
-    @app.get("/api/llm-base-urls/status", response_model=LlmBaseUrlStatusesResponse)
-    async def get_llm_base_url_statuses(
-        limit: int = Query(default=200, ge=1, le=1000),
-    ) -> LlmBaseUrlStatusesResponse:
-        urls = storage.get_llm_base_urls(limit=limit)
+    @app.get("/api/llm/status", response_model=LlmStatusResponse)
+    async def get_llm_status() -> LlmStatusResponse:
+        url = config.llm_url
+        available = await _check_llm_availability(url, config.llm_api_key)
         now = datetime.now(UTC)
-        items: list[LlmBaseUrlStatusRecord] = []
-        for url in urls:
-            available = await _check_provider_availability(url, config.ollama_api_key)
-            previous = storage.get_llm_base_url_status(url)
-            if previous is None:
-                last_changed_at = now
+        previous = storage.get_llm_status(url)
+        last_changed_at = now
+        if previous is not None:
+            previous_available, previous_changed_at, _previous_checked_at = previous
+            if previous_available == available:
+                last_changed_at = previous_changed_at
             else:
-                previous_available, previous_changed_at, _previous_checked_at = previous
-                if previous_available != available:
-                    last_changed_at = now
-                    logger.info(
-                        "Provider availability changed url=%s ip=%s available=%s previous=%s",
-                        url,
-                        _resolve_provider_ip(url),
-                        available,
-                        previous_available,
-                    )
-                else:
-                    last_changed_at = previous_changed_at
-            storage.upsert_llm_base_url_status(
-                llm_base_url=url,
-                is_available=available,
-                last_changed_at=last_changed_at,
-                last_checked_at=now,
-            )
-            items.append(
-                LlmBaseUrlStatusRecord(
-                    url=url,
-                    available=available,
-                    last_changed_at=last_changed_at,
-                    last_checked_at=now,
+                logger.info(
+                    "LLM availability changed url=%s ip=%s available=%s previous=%s",
+                    url,
+                    _resolve_host_ip(url),
+                    available,
+                    previous_available,
                 )
-            )
-        return LlmBaseUrlStatusesResponse(items=items)
+        storage.upsert_llm_status(
+            url=url, is_available=available, last_changed_at=last_changed_at, last_checked_at=now
+        )
+        return LlmStatusResponse(
+            url=url, available=available, last_changed_at=last_changed_at, last_checked_at=now
+        )
 
     @app.get("/api/rag/collections", response_model=RagCollectionsResponse)
     async def get_rag_collections() -> RagCollectionsResponse:
@@ -459,87 +424,15 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         )
 
     @app.get("/api/models", response_model=ModelsResponse)
-    async def get_models(
-        provider: str | None = Query(default=None),
-        base_url: str | None = Query(default=None),
-    ) -> ModelsResponse:
-        settings = storage.get_settings()
-        target = target_provider(provider, settings.provider)
-        target_base_url = (base_url or settings.llm_base_url).strip()
-
-        if target != "ollama":
-            return ModelsResponse(provider=target, models=[], error=None)
-
+    async def get_models() -> ModelsResponse:
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    f"{target_base_url.rstrip('/')}/api/tags",
-                    headers=_bearer_headers(config.ollama_api_key),
-                )
-                response.raise_for_status()
-                payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            logger.warning(
-                "Failed to fetch Ollama models base_url=%s error_type=%s error=%s",
-                target_base_url,
-                type(exc).__name__,
-                exc,
-            )
-            return ModelsResponse(provider="ollama", models=[], error=str(exc))
-
-        raw_models = payload.get("models", []) if isinstance(payload, dict) else None
-        if not isinstance(raw_models, list):
-            return ModelsResponse(
-                provider="ollama",
-                models=[],
-                error="Unexpected tags response format.",
-            )
-
-        names: list[str] = []
-        for item in raw_models:
-            if isinstance(item, dict):
-                name = item.get("name")
-                if isinstance(name, str) and name.strip():
-                    names.append(name.strip())
-
-        names = sorted(dict.fromkeys(names), key=lambda item: item.casefold())
-        return ModelsResponse(provider="ollama", models=names, error=None)
-
-    @app.post("/api/models/pull", response_model=ModelPullResponse)
-    async def pull_model(request: ModelPullRequest) -> ModelPullResponse:
-        settings = storage.get_settings()
-        if target_provider(request.provider, settings.provider) != "ollama":
-            raise HTTPException(status_code=400, detail="Model pull is only supported for Ollama.")
-
-        target_base_url = (request.base_url or settings.llm_base_url).strip()
-        model_name = request.name.strip()
-        if not model_name:
-            raise HTTPException(status_code=400, detail="Model name is required.")
-
-        logger.info("Pulling Ollama model name=%s from %s", model_name, target_base_url)
-        try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                response = await client.post(
-                    f"{target_base_url.rstrip('/')}/api/pull",
-                    json={"name": model_name, "stream": False},
-                    headers=_bearer_headers(config.ollama_api_key),
-                )
-                response.raise_for_status()
-                payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            logger.warning(
-                "Failed to pull Ollama model name=%s base_url=%s error_type=%s error=%s",
-                model_name,
-                target_base_url,
-                type(exc).__name__,
-                exc,
-            )
-            raise HTTPException(status_code=502, detail=f"Failed to pull model: {exc}") from exc
-
-        status = payload.get("status", "success") if isinstance(payload, dict) else "success"
-        if not isinstance(status, str):
-            status = "success"
-        return ModelPullResponse(provider="ollama", pulled_model=model_name, status=status)
+            models = await svc.llm.list_models()
+        except LlmError as exc:
+            logger.warning("Failed to list models url=%s error=%s", config.llm_url, exc)
+            return ModelsResponse(default_model=config.llm_model, models=[], error=str(exc))
+        return ModelsResponse(
+            default_model=config.llm_model, models=sorted(models, key=str.casefold)
+        )
 
     @app.get("/api/topics")
     async def get_topics() -> dict[str, list[str]]:
@@ -657,6 +550,7 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
             "context_chunks_used": len(context),
             "temporary_chat": request.temporary_chat,
             "history_saved": not request.temporary_chat,
+            "model": llm_result.model,
             "provider_metrics": llm_result.provider_metrics,
         }
 
@@ -665,8 +559,8 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
             logger.info("Temporary chat mode enabled; skipping history persistence")
         else:
             history_id = storage.append_history(
-                provider=settings.provider,
-                model=settings.model,
+                provider="openai",
+                model=llm_result.model,
                 system_prompt=settings.system_prompt,
                 question=request.question,
                 answer=llm_result.answer,

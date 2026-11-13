@@ -19,7 +19,7 @@ from chat_hacksman.models import (
 
 # Bump when the schema changes, and migrate older databases in _init_db
 # (stored in SQLite's PRAGMA user_version).
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Storage:
@@ -138,14 +138,6 @@ class Storage:
             )
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS llm_base_url_history (
-                    url TEXT PRIMARY KEY,
-                    last_used_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
                 CREATE TABLE IF NOT EXISTS llm_base_url_status (
                     url TEXT PRIMARY KEY,
                     is_available INTEGER NOT NULL,
@@ -156,7 +148,35 @@ class Storage:
             )
             # Version 1 is the schema above, which older databases reach through
             # CREATE TABLE IF NOT EXISTS and _ensure_chat_history_prompt_id_column.
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if version < 2:
+                self._migrate_to_openai_chat(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION:d}")
+
+    def _migrate_to_openai_chat(self, conn: sqlite3.Connection) -> None:
+        """Version 2: the chat server comes from LLM_URL, not saved settings.
+
+        Drops the saved provider, base URL and model (an Ollama tag such as
+        llama3.2:latest means nothing to other servers; LLM_MODEL takes
+        over), the Ollama-only tweaks, and the list of base URLs used.
+        """
+        conn.execute("DROP TABLE IF EXISTS llm_base_url_history")
+        conn.execute("DELETE FROM llm_base_url_status")
+        row = conn.execute("SELECT payload_json FROM app_settings WHERE id = 1").fetchone()
+        if not row:
+            return
+        payload = json.loads(row["payload_json"])
+        if not isinstance(payload, dict):
+            return
+        for key in ("provider", "llm_base_url", "model"):
+            payload.pop(key, None)
+        tweaks = payload.get("tweaks")
+        if isinstance(tweaks, dict):
+            for key in ("num_ctx", "repeat_penalty"):
+                tweaks.pop(key, None)
+        conn.execute(
+            "UPDATE app_settings SET payload_json = ? WHERE id = 1", (json.dumps(payload),)
+        )
 
     def _ensure_chat_history_prompt_id_column(self, conn: sqlite3.Connection) -> None:
         columns = conn.execute("PRAGMA table_info(chat_history)").fetchall()
@@ -210,39 +230,8 @@ class Storage:
             conn.commit()
         return settings
 
-    def remember_llm_base_url(self, llm_base_url: str) -> None:
-        normalized = llm_base_url.strip()
-        if not normalized:
-            return
-        last_used_at = datetime.now(UTC).isoformat()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO llm_base_url_history (url, last_used_at)
-                VALUES (?, ?)
-                ON CONFLICT(url) DO UPDATE SET
-                    last_used_at = excluded.last_used_at
-                """,
-                (normalized, last_used_at),
-            )
-            conn.commit()
-
-    def get_llm_base_urls(self, *, limit: int = 200) -> list[str]:
-        safe_limit = max(1, min(limit, 1000))
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT url
-                FROM llm_base_url_history
-                ORDER BY LOWER(url) ASC
-                LIMIT ?
-                """,
-                (safe_limit,),
-            ).fetchall()
-        return [str(row["url"]) for row in rows]
-
-    def get_llm_base_url_status(self, llm_base_url: str) -> tuple[bool, datetime, datetime] | None:
-        normalized = llm_base_url.strip()
+    def get_llm_status(self, url: str) -> tuple[bool, datetime, datetime] | None:
+        normalized = url.strip()
         if not normalized:
             return None
         with self._connect() as conn:
@@ -262,15 +251,15 @@ class Storage:
             datetime.fromisoformat(row["last_checked_at"]),
         )
 
-    def upsert_llm_base_url_status(
+    def upsert_llm_status(
         self,
         *,
-        llm_base_url: str,
+        url: str,
         is_available: bool,
         last_changed_at: datetime,
         last_checked_at: datetime,
     ) -> None:
-        normalized = llm_base_url.strip()
+        normalized = url.strip()
         if not normalized:
             return
         with self._connect() as conn:
