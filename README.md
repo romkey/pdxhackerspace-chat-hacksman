@@ -5,12 +5,11 @@
 [![Python 3.15](https://img.shields.io/badge/python-3.15-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A web chatbot for PDX Hackerspace members. It answers with any
-OpenAI-compatible chat API (OpenAI, llama.cpp, vLLM...) and can ground its
-answers in up to five Qdrant collections (wiki, events, Slack, Calibre
-books...), embedding each question with any OpenAI-compatible embeddings
-API. Topic buttons, the
-events feed, chat history and thumbs-up/down feedback are kept in SQLite.
+The member chatbot for PDX Hackerspace. It answers members' questions
+only from the shared RAG pipeline's member collections (`hs_member` and
+`hs_catalog` in Qdrant), citing its sources, with any OpenAI-compatible
+chat API (llama.cpp, vLLM...) and embeddings API. Topic buttons, the
+events feed, the answer log and thumbs-up/down feedback are kept in SQLite.
 
 > **AI disclosure:** This project was written by AI under human oversight,
 > following [these rules](https://github.com/romkey/python-ai-rules/blob/main/RULES.md).
@@ -22,49 +21,54 @@ events feed, chat history and thumbs-up/down feedback are kept in SQLite.
 | `src/chat_hacksman/__main__.py` | The `chat-hacksman` command: reads settings, starts uvicorn |
 | `src/chat_hacksman/config.py` | `Settings` from environment variables; embedding query prefixes |
 | `src/chat_hacksman/server.py` | The FastAPI app (`create_app`) and its HTTP API |
-| `src/chat_hacksman/rag.py` | Embeds questions and searches Qdrant, with per-collection filters |
+| `src/chat_hacksman/rag.py` | Hybrid (dense + BM25) search of Qdrant, filters, authority pass |
 | `src/chat_hacksman/rerank.py` | Optional reranker client (Jina/Cohere and TEI formats) |
-| `src/chat_hacksman/llm.py` | Builds the prompt and calls the chat completions API, with retries |
+| `src/chat_hacksman/llm.py` | Answering rules, prompt, query rewrite, streamed chat completions |
 | `src/chat_hacksman/storage.py` | SQLite: settings, history, feedback, events, LLM server status |
 | `src/chat_hacksman/topics.py` | Fetches and caches the topics/events feed |
 | `src/chat_hacksman/models.py` | Pydantic request/response models |
 | `src/chat_hacksman/static/` | The browser UI |
 | `tests/` | pytest tests |
+| `evals/`, `scripts/run-evals.py` | Golden set and red-team prompts, run against a live bot |
 | `docs/configuration.md` | Every environment variable |
 
 ## Technical details
 
 A question goes through these steps:
 
-1. **Embed.** If RAG is on and collections are enabled, the question
-   (with the model's query prefix, e.g. `search_query: ` for the default
-   `nomic-ai/modernbert-embed-base`) is sent to
-   `POST {EMBEDDING_URL}/embeddings`. Any OpenAI-compatible server works:
-   OpenAI, Hugging Face TEI, Infinity, vLLM or llama.cpp's `llama-server`.
-   Use the same model and prefixes the collections were
-   ingested with; [docs/configuration.md](docs/configuration.md#embeddings)
-   lists the prefixes for common models.
-2. **Search.** Each enabled Qdrant collection is searched, skipping any
-   whose vector size doesn't match. Collections named `events*`, `slack*`
-   and `calibre*` get filters picked from the question's wording (upcoming
-   vs. past events, channel vs. thread summaries, catalog vs. passages).
-   Hits below `RAG_MIN_SCORE` are dropped.
-3. **Rerank** (optional, when `RERANK_URL` is set). More candidates are
-   fetched per collection, and a cross-encoder reranker (default
-   `BAAI/bge-reranker-v2-m3`, served by llama.cpp, vLLM, TEI, Infinity, or
-   the Jina or Cohere APIs) scores each against the question; only the
-   best go on, from whichever collections they come from. See
-   [docs/configuration.md](docs/configuration.md#reranking). Schedule
-   questions with no event hits fall back to upcoming events from the feed.
-4. **Answer.** The chunks go into the system prompt and the question to
-   the chat model at `POST {LLM_URL}/chat/completions`. The server comes
-   from `LLM_URL`; the model from the UI, else `LLM_MODEL`, else the first
-   one the server lists.
-5. **Record.** The question, answer, settings and timings are saved to
-   history unless it's a temporary chat.
+1. **Rewrite.** The browser keeps the conversation (it's forgotten on
+   reload) and sends the last turns with each question. With earlier
+   turns, the chat model rewrites the question into a standalone search
+   query.
+2. **Embed.** The query (with the model's query prefix, e.g.
+   `search_query: ` for the default `nomic-ai/modernbert-embed-base`) is
+   sent to `POST {EMBEDDING_URL}/embeddings`. Use the same model and
+   prefixes the collections were ingested with;
+   [docs/configuration.md](docs/configuration.md#embeddings) lists them.
+3. **Search.** Each collection is searched by its dense vector and, by
+   keyword, its sparse BM25 vector (inferred by Qdrant), fused with
+   reciprocal rank fusion: `RAG_CANDIDATES` (50) hits each. Points whose
+   `tier` isn't allowed, that are `superseded_by` another, or that are past
+   `stale_after` are never returned.
+4. **Rerank and pick** (reranking when `RERANK_URL` is set). A cross-encoder
+   scores every candidate against the query; the best `RAG_TOP_N` (8) go
+   on, preferring higher `authority` (policy and signs, then the wiki...)
+   when relevance is close, and always including a relevant policy or
+   sign. Schedule questions with no event hits get upcoming events from
+   the live feed.
+5. **Answer.** With no sources, the bot says it can't answer and gives
+   next steps, without calling the model. Otherwise the fixed answering
+   rules, the bot's prompt and the sources (marked as data) go to
+   `POST {LLM_URL}/chat/completions`, and the answer streams back.
+6. **Check and record.** The answer counts as answered if it cites a
+   source. The question, answer, retrieved document IDs, topics and
+   whether it was answered are saved (never who asked), unless it's a
+   temporary chat. `GET /api/reports/unanswered` is the to-do list for the
+   wiki.
 
-If Qdrant or the embedding server is unreachable, the chat still works
-without RAG; if the reranker is, the vector search order is used.
+If Qdrant or the embedding server is unreachable, nothing is found and the
+bot says so; if the reranker is, the search order is used; if Qdrant can't
+do BM25 inference, dense search alone is used.
 
 HTTP API (all under optional basic auth except the health checks):
 
@@ -72,7 +76,7 @@ HTTP API (all under optional basic auth except the health checks):
 |----------|--------------|
 | `GET /healthz`, `GET /health` | Health check (`/healthz` includes the version) |
 | `GET /`, `/static/...` | The UI |
-| `POST /api/chat` | Ask a question: `{"question", "use_rag", "temporary_chat"}` |
+| `POST /api/chat` | Ask a question: `{"question", "history", "temporary_chat", "stream"}`; with `stream`, newline-delimited JSON `delta` events then `done` |
 | `GET`/`PUT /api/settings` | Model, system prompt, tweaks, enabled collections |
 | `GET /api/rag/collections` | Configured and enabled collections |
 | `GET /api/models` | Models the LLM server offers, and the `LLM_MODEL` default |
@@ -80,6 +84,8 @@ HTTP API (all under optional basic auth except the health checks):
 | `GET /api/topics`, `/api/events`, `/api/occurrences` | The topics feed and stored events |
 | `GET`/`DELETE /api/history`, `DELETE /api/history/latest` | Chat history |
 | `GET`/`POST /api/feedback` | Thumbs up/down with notes |
+| `GET /api/reports/unanswered?days=7` | Questions not answered from sources, grouped by topic |
+| `GET /api/reports/negative-feedback?days=7` | Thumbs-down answers with their source documents |
 | `GET /api/meta` | Name, version, repo link |
 
 The UI offers the standard sampling options: `temperature`, `top_p`,
@@ -149,6 +155,19 @@ chat-hacksman
 
 Either way, `uvx pre-commit install` (or `pip install pre-commit &&
 pre-commit install`) runs the lint checks on every commit.
+
+### Evaluation
+
+The tests fake every model. To check the real thing, run the golden set
+and red-team prompts against a running bot after every change to prompts,
+models or retrieval settings, and after every re-index:
+
+```bash
+uv run scripts/run-evals.py --url http://localhost:8000 --canary ADMIN-CANARY-1 --canary SLACK-CANARY-1
+```
+
+Add real member questions and their expected documents to
+`evals/golden.json`; pass each planted canary string with `--canary`.
 
 ## License
 

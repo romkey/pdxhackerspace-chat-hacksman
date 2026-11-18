@@ -28,7 +28,7 @@ const fields = {
   footerMeta: el("footer-meta"),
   topicButtons: el("topic-buttons"),
   ragCollections: el("rag-collections"),
-  useRag: el("use-rag"),
+  conversation: el("conversation"),
   temporaryChat: el("temporary-chat"),
 };
 let availableRagCollections = [];
@@ -36,6 +36,10 @@ let availableModels = [];
 let defaultModel = "";
 let selectedFeedbackRating = null;
 let lastResponseForFeedback = null;
+// This conversation's turns, kept in the page only: reloading forgets them.
+// Each is {question, answer, sources, citations, answered, pending}.
+let conversation = [];
+const HISTORY_TURNS_SENT = 12;
 const PERFORMANCE_HISTORY_LIMIT = 20;
 const diagnosticsState = {
   health: { status: "unknown", checkedAt: null, error: null },
@@ -47,7 +51,6 @@ const diagnosticsState = {
     error: null,
   },
   rag: {
-    useRag: true,
     temporaryChat: false,
     availableCollections: [],
     enabledCollections: [],
@@ -231,7 +234,6 @@ async function copyDiagnostics() {
     copied_at: isoNow(),
     ui_settings: {
       model: getCurrentModel() || `(default) ${defaultModel}`,
-      use_rag: fields.useRag.checked,
       enabled_rag_collections: enabledRagCollections,
     },
     diagnostics: diagnosticsState,
@@ -281,7 +283,6 @@ function renderDiagnostics() {
 
   const ragLine = [
     "[rag]",
-    `use_rag=${diagnosticsState.rag.useRag}`,
     `temporary_chat=${diagnosticsState.rag.temporaryChat}`,
     `available=${diagnosticsState.rag.availableCollections.length}`,
     `enabled=${diagnosticsState.rag.enabledCollections.length}`,
@@ -374,7 +375,6 @@ function currentSettingsPayload() {
     fields.ragCollections.querySelectorAll("input[type='checkbox']:checked")
   ).map((input) => input.value);
   diagnosticsState.rag.enabledCollections = enabledRagCollections;
-  diagnosticsState.rag.useRag = fields.useRag.checked;
   diagnosticsState.rag.temporaryChat = fields.temporaryChat.checked;
   renderDiagnostics();
   return {
@@ -468,7 +468,6 @@ async function loadSettings() {
   }
   populateModelSelect(data.model);
   diagnosticsState.rag.enabledCollections = data.enabled_rag_collections || [];
-  diagnosticsState.rag.useRag = fields.useRag.checked;
   renderDiagnostics();
 }
 
@@ -749,14 +748,151 @@ function clearPerformanceTrend() {
   showStatus("Performance trend cleared.");
 }
 
+function safeHref(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function sourceLabel(chunk) {
+  const meta = chunk.metadata || {};
+  const parts = [meta.title, meta.heading_path].filter((part) => typeof part === "string" && part);
+  let label = parts.join(" > ") || meta.source || chunk.collection;
+  if (meta.page) {
+    label += `, page ${meta.page}`;
+  }
+  if (meta.source === "slack" && meta.updated_at) {
+    label += ` (Slack discussion, ${String(meta.updated_at).slice(0, 10)})`;
+  }
+  return label;
+}
+
+function renderSources(turn) {
+  const list = document.createElement("ol");
+  list.className = "turn-sources";
+  for (const n of turn.citations || []) {
+    const chunk = (turn.sources || [])[n - 1];
+    if (!chunk) {
+      continue;
+    }
+    const li = document.createElement("li");
+    li.value = n;
+    const href = safeHref((chunk.metadata || {}).url || "");
+    if (href) {
+      const link = document.createElement("a");
+      link.href = href;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = sourceLabel(chunk);
+      li.append(link);
+    } else {
+      li.textContent = sourceLabel(chunk);
+    }
+    list.append(li);
+  }
+  return list.childElementCount ? list : null;
+}
+
+function renderConversation() {
+  const box = fields.conversation;
+  if (!box) {
+    return;
+  }
+  box.replaceChildren();
+  if (!conversation.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "Ask a question to start. The conversation is forgotten when you reload.";
+    box.append(empty);
+    return;
+  }
+  for (const turn of conversation) {
+    const item = document.createElement("div");
+    item.className = "turn";
+    const question = document.createElement("p");
+    question.className = "turn-question";
+    question.textContent = turn.question;
+    const answer = document.createElement("p");
+    answer.className = "turn-answer";
+    answer.textContent = turn.answer || (turn.pending ? "…" : "");
+    item.append(question, answer);
+    const sources = renderSources(turn);
+    if (sources) {
+      item.append(sources);
+    }
+    box.append(item);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+function historyPayload() {
+  const turns = [];
+  for (const turn of conversation) {
+    if (turn.pending || turn.failed || !turn.answer) {
+      continue;
+    }
+    turns.push({ role: "user", content: turn.question });
+    turns.push({ role: "assistant", content: turn.answer });
+  }
+  return turns.slice(-HISTORY_TURNS_SENT);
+}
+
+// Reads the newline-delimited JSON events of a streamed /api/chat answer:
+// {"type": "delta", "text"}, then {"type": "done", ...the full response}
+// or {"type": "error", "detail"}.
+async function readChatStream(response, turn) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let done = null;
+  for (;;) {
+    const { value, done: finished } = await reader.read();
+    if (value) {
+      buffer += decoder.decode(value, { stream: true });
+    }
+    let newline = buffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      newline = buffer.indexOf("\n");
+      if (!line) {
+        continue;
+      }
+      const event = JSON.parse(line);
+      if (event.type === "delta") {
+        turn.answer += event.text;
+        renderConversation();
+      } else if (event.type === "error") {
+        throw new Error(event.detail || "The model failed.");
+      } else if (event.type === "done") {
+        done = event;
+      }
+    }
+    if (finished) {
+      break;
+    }
+  }
+  if (!done) {
+    throw new Error("The answer stopped before it finished.");
+  }
+  return done;
+}
+
 async function askQuestion() {
   const question = fields.question.value.trim();
   if (!question) {
     showStatus("Enter a question first.");
     return;
   }
-  showStatus("Saving settings and contacting model...");
-  fields.response.textContent = "";
+  showStatus("Saving settings and searching...");
+  const history = historyPayload();
+  const turn = { question, answer: "", sources: [], citations: [], pending: true };
+  conversation.push(turn);
+  renderConversation();
+  fields.question.value = "";
   setResponseLoading(true);
   try {
     await saveSettings();
@@ -766,33 +902,22 @@ async function askQuestion() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         question,
-        use_rag: fields.useRag.checked,
+        history,
         temporary_chat: fields.temporaryChat.checked,
+        stream: true,
       }),
     });
     if (!response.ok) {
-      const errBody = await response.text();
-      fields.response.textContent = `Request failed: ${errBody}`;
-      diagnosticsState.rag.lastError = errBody;
-      diagnosticsState.rag.lastAskedAt = isoNow();
-      diagnosticsState.performance = {
-        totalLatencyMs: null,
-        ragLatencyMs: null,
-        llmLatencyMs: null,
-        promptTokens: null,
-        completionTokens: null,
-        totalTokens: null,
-        tokensPerSecond: null,
-      };
-      renderDiagnostics();
-      renderMetrics();
-      showStatus("Chat request failed.");
-      lastResponseForFeedback = null;
-      showFeedbackStatus("");
-      return;
+      throw new Error(await response.text());
     }
-    const data = await response.json();
-    fields.response.textContent = data.answer;
+    setResponseLoading(false);
+    const data = await readChatStream(response, turn);
+    turn.pending = false;
+    turn.answer = data.answer;
+    turn.sources = data.context || [];
+    turn.citations = data.citations || [];
+    turn.answered = data.answered;
+    renderConversation();
     pulseResponsePanel();
     lastResponseForFeedback = {
       question,
@@ -804,9 +929,9 @@ async function askQuestion() {
     selectedFeedbackRating = null;
     updateFeedbackButtons();
     showFeedbackStatus("");
-    diagnosticsState.rag.lastContextChunks = (data.context || []).length;
+    diagnosticsState.rag.lastContextChunks = turn.sources.length;
     diagnosticsState.rag.lastContextCollections = Array.from(
-      new Set((data.context || []).map((chunk) => chunk.collection))
+      new Set(turn.sources.map((chunk) => chunk.collection))
     );
     diagnosticsState.rag.lastError = null;
     diagnosticsState.rag.lastAskedAt = isoNow();
@@ -831,10 +956,23 @@ async function askQuestion() {
     renderMetrics();
     renderPerformanceChart();
     showStatus(
-      `Done. Context chunks used: ${data.context.length}. Latency: ${data.metrics?.total_latency_ms ?? "n/a"} ms${fields.temporaryChat.checked ? " (temporary, not saved)" : ""}`
+      `Done. Sources: ${turn.sources.length}, cited: ${turn.citations.length}. First token: ${data.metrics?.first_token_ms ?? "n/a"} ms, total: ${data.metrics?.total_latency_ms ?? "n/a"} ms${fields.temporaryChat.checked ? " (temporary, not saved)" : ""}`
     );
     await loadHistory();
     await loadFeedback();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    turn.pending = false;
+    // Failed turns are shown but not sent back as history.
+    turn.failed = true;
+    turn.answer = `Request failed: ${message}`;
+    renderConversation();
+    diagnosticsState.rag.lastError = message;
+    diagnosticsState.rag.lastAskedAt = isoNow();
+    renderDiagnostics();
+    showStatus("Chat request failed.");
+    lastResponseForFeedback = null;
+    showFeedbackStatus("");
   } finally {
     setResponseLoading(false);
   }
@@ -926,12 +1064,13 @@ if (fields.refreshModels) {
     }
   });
 }
-if (fields.useRag) {
-  fields.useRag.addEventListener("change", () => {
-    diagnosticsState.rag.useRag = fields.useRag.checked;
-    renderDiagnostics();
-  });
-}
+bindClick("new-conversation", () => {
+  conversation = [];
+  renderConversation();
+  lastResponseForFeedback = null;
+  showFeedbackStatus("");
+  showStatus("New conversation started.");
+});
 if (fields.temporaryChat) {
   fields.temporaryChat.addEventListener("change", () => {
     diagnosticsState.rag.temporaryChat = fields.temporaryChat.checked;
@@ -1020,6 +1159,7 @@ async function bootstrap() {
   bindTabNavigation();
   setActiveTab("chat");
   initHelpTips();
+  renderConversation();
   renderDiagnostics();
   renderMetrics();
   renderPerformanceChart();

@@ -5,12 +5,13 @@ create_app() builds it from Settings; nothing here reads the environment.
 
 import base64
 import binascii
+import json
 import logging
 import secrets
 import socket
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import perf_counter
 
@@ -21,16 +22,17 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from chat_hacksman import __version__
 from chat_hacksman.config import Settings
-from chat_hacksman.llm import LlmError, LlmService
+from chat_hacksman.llm import LlmError, LlmResult, LlmService, StreamState, citations
 from chat_hacksman.models import (
     AppSettings,
     ChatRequest,
     ChatResponse,
+    ChatTurn,
     ContextChunk,
     EventRecord,
     FeedbackCreateRequest,
@@ -39,9 +41,14 @@ from chat_hacksman.models import (
     LlmStatusResponse,
     MetaResponse,
     ModelsResponse,
+    NegativeFeedbackItem,
+    NegativeFeedbackReport,
     OccurrenceRecord,
     RagCollectionsResponse,
     SettingsUpdate,
+    UnansweredGroup,
+    UnansweredQuestion,
+    UnansweredReport,
 )
 from chat_hacksman.rag import RagService
 from chat_hacksman.rerank import Reranker
@@ -82,17 +89,18 @@ def build_services(settings: Settings) -> Services:
             embedding_url=settings.embedding_url,
             embedding_model=settings.embedding_model,
             embedding_context_length=settings.embedding_context_length,
-            top_k=settings.rag_top_k,
-            top_k_events=settings.rag_top_k_events,
-            top_k_slack=settings.rag_top_k_slack,
-            top_k_calibre=settings.rag_top_k_calibre,
+            candidates=settings.rag_candidates,
+            top_n=settings.rag_top_n,
             min_score=settings.rag_min_score,
+            dense_vector=settings.rag_dense_vector,
+            sparse_vector=settings.rag_sparse_vector,
+            sparse_model=settings.rag_sparse_model,
+            allowed_tiers=settings.rag_allowed_tiers,
+            authority_weight=settings.rag_authority_weight,
             embedding_timeout_seconds=settings.embedding_timeout_seconds,
             embedding_api_key=settings.embedding_api_key,
             embedding_query_prefix=settings.embedding_query_prefix,
             reranker=build_reranker(settings),
-            rerank_candidates=settings.rerank_candidates,
-            rerank_top_n=settings.rerank_top_n,
             rerank_min_score=settings.rerank_min_score,
         ),
         llm=LlmService(
@@ -246,19 +254,51 @@ def _build_fallback_events_context(services: Services, limit: int = 3) -> list[C
             text += f" (open_to={open_to})"
         out.append(
             ContextChunk(
-                collection="events",
+                collection="events feed",
                 score=1.0,
                 text=text,
                 metadata={
+                    "source": "event",
                     "title": title,
-                    "record_type": "occurrence",
+                    "tier": "member",
+                    "authority": 3,
+                    "updated_at": datetime.now(tz=UTC).isoformat(timespec="minutes"),
                     "start_time": payload["occurs_at"],
                     "duration": payload.get("duration"),
-                    "temporal_status": "future",
                 },
             )
         )
     return out
+
+
+@dataclass(slots=True)
+class Prepared:
+    """A question made ready to answer: what was searched and found."""
+
+    search_query: str
+    history: list[ChatTurn]
+    context: list[ContextChunk]
+    rewrite_latency_ms: float
+    rag_latency_ms: float
+    started: float = field(default_factory=perf_counter)
+
+
+def _doc_ids(context: list[ContextChunk]) -> list[str]:
+    ids = (
+        f"{chunk.metadata.get('source', chunk.collection)}:{chunk.metadata['doc_id']}"
+        for chunk in context
+        if isinstance(chunk.metadata.get("doc_id"), str | int)
+    )
+    return list(dict.fromkeys(ids))
+
+
+def _topics(context: list[ContextChunk]) -> list[str]:
+    topics: dict[str, None] = {}
+    for chunk in context:
+        values = chunk.metadata.get("topics")
+        if isinstance(values, list):
+            topics.update((str(value), None) for value in values if str(value).strip())
+    return list(topics)
 
 
 def basic_auth_valid(settings: Settings, authorization_header: str | None) -> bool:
@@ -470,16 +510,13 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         return storage.get_feedback(limit=limit)
 
     @app.post("/api/feedback")
-    async def post_feedback(
-        request: FeedbackCreateRequest, http_request: Request
-    ) -> dict[str, int]:
+    async def post_feedback(request: FeedbackCreateRequest) -> dict[str, int]:
         feedback_id = storage.append_feedback(request)
         logger.info(
-            "Recorded feedback id=%s rating=%s history_id=%s client_ip=%s",
+            "Recorded feedback id=%s rating=%s history_id=%s",
             feedback_id,
             request.rating,
             request.history_id,
-            _client_ip_from_request(http_request),
         )
         return {"id": feedback_id}
 
@@ -495,84 +532,199 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         logger.info("Deleted most recent history row count=%d", deleted_rows)
         return {"deleted_rows": deleted_rows}
 
-    @app.post("/api/chat", response_model=ChatResponse)
-    async def post_chat(request: ChatRequest, http_request: Request) -> ChatResponse:
-        request_started = perf_counter()
-        client_ip = _client_ip_from_request(http_request)
-        settings = storage.get_settings()
-        enabled_collections = available_collections(settings.enabled_rag_collections)
-        rag_started = perf_counter()
-        if request.use_rag:
-            logger.info(
-                "Chat request using RAG=%s enabled_collections=%s client_ip=%s",
-                request.use_rag,
-                ",".join(enabled_collections) or "(none)",
-                client_ip,
+    @app.get("/api/reports/unanswered", response_model=UnansweredReport)
+    async def get_unanswered_report(days: int = Query(default=7, ge=1, le=365)) -> UnansweredReport:
+        """Questions not answered from sources, grouped by the first topic of
+        what was found: the to-do list for the wiki."""
+        since = datetime.now(UTC) - timedelta(days=days)
+        rows = storage.get_unanswered(since=since)
+        groups: dict[str, list[UnansweredQuestion]] = {}
+        for history_id, created_at, question, topics in rows:
+            groups.setdefault(topics[0] if topics else "unclassified", []).append(
+                UnansweredQuestion(history_id=history_id, created_at=created_at, question=question)
             )
-            context = await svc.rag.retrieve(
-                request.question,
-                enabled_collections=enabled_collections,
-            )
-            if (
-                "events" in enabled_collections
-                and _is_events_schedule_query(request.question)
-                and not any(chunk.collection == "events" for chunk in context)
-            ):
-                context.extend(_build_fallback_events_context(svc, limit=3))
-        else:
-            logger.info("Chat request with RAG disabled client_ip=%s", client_ip)
-            context = []
-        rag_latency_ms = (perf_counter() - rag_started) * 1000.0
+        ordered = sorted(groups.items(), key=lambda item: (-len(item[1]), item[0]))
+        return UnansweredReport(
+            since=since,
+            total=len(rows),
+            groups=[UnansweredGroup(topic=topic, questions=items) for topic, items in ordered],
+        )
 
+    @app.get("/api/reports/negative-feedback", response_model=NegativeFeedbackReport)
+    async def get_negative_feedback_report(
+        days: int = Query(default=7, ge=1, le=365),
+    ) -> NegativeFeedbackReport:
+        """Thumbs-down answers, with the documents they were answered from."""
+        since = datetime.now(UTC) - timedelta(days=days)
+        return NegativeFeedbackReport(
+            since=since,
+            items=[
+                NegativeFeedbackItem(
+                    feedback_id=feedback_id,
+                    created_at=created_at,
+                    note=note,
+                    question=question,
+                    answer=answer,
+                    doc_ids=doc_ids,
+                )
+                for feedback_id, created_at, note, question, answer, doc_ids in (
+                    storage.get_negative_feedback(since=since)
+                )
+            ],
+        )
+
+    async def prepare(request: ChatRequest, settings: AppSettings) -> Prepared:
+        """Steps 1-4: rewrite the question with the conversation, then
+        search, rerank and pick the sources."""
+        started = perf_counter()
+        turns = config.chat_history_turns
+        history = request.history[-turns:] if turns > 0 else []
+        search_query = await svc.llm.rewrite_query(
+            settings=settings, question=request.question, history=history
+        )
+        rewrite_latency_ms = (perf_counter() - started) * 1000.0
+        rag_started = perf_counter()
+        enabled = available_collections(settings.enabled_rag_collections)
+        context = await svc.rag.retrieve(search_query, enabled_collections=enabled)
+        # Live facts come from the events feed, not the index.
+        if _is_events_schedule_query(search_query) and not any(
+            chunk.metadata.get("source") == "event" for chunk in context
+        ):
+            context.extend(_build_fallback_events_context(svc, limit=3))
+        logger.info(
+            "Chat request history_turns=%d rewritten=%s sources=%d",
+            len(history),
+            search_query != request.question,
+            len(context),
+        )
+        return Prepared(
+            search_query=search_query,
+            history=history,
+            context=context,
+            rewrite_latency_ms=rewrite_latency_ms,
+            rag_latency_ms=(perf_counter() - rag_started) * 1000.0,
+            started=started,
+        )
+
+    def finish(
+        request: ChatRequest,
+        settings: AppSettings,
+        prepared: Prepared,
+        answer: str,
+        llm_result: LlmResult | None,
+    ) -> ChatResponse:
+        """Step 6 and the log: check citations, record the chat."""
+        context = prepared.context
+        cited = citations(answer, len(context))
+        answered = bool(context) and bool(cited)
+        metrics: dict[str, Any] = {
+            "total_latency_ms": round((perf_counter() - prepared.started) * 1000.0, 2),
+            "rewrite_latency_ms": round(prepared.rewrite_latency_ms, 2),
+            "rag_latency_ms": round(prepared.rag_latency_ms, 2),
+            "context_chunks_used": len(context),
+            "temporary_chat": request.temporary_chat,
+            "history_saved": not request.temporary_chat,
+            "answered": answered,
+        }
+        if llm_result is not None:
+            metrics.update(
+                {
+                    "llm_latency_ms": round(llm_result.llm_latency_ms, 2),
+                    "first_token_ms": (
+                        round(llm_result.first_token_ms, 2)
+                        if llm_result.first_token_ms is not None
+                        else None
+                    ),
+                    "prompt_tokens": llm_result.input_tokens,
+                    "completion_tokens": llm_result.output_tokens,
+                    "total_tokens": llm_result.total_tokens,
+                    "tokens_per_second": (
+                        round(llm_result.tokens_per_second, 2)
+                        if llm_result.tokens_per_second is not None
+                        else None
+                    ),
+                    "model": llm_result.model,
+                    "provider_metrics": llm_result.provider_metrics,
+                }
+            )
+        logger.info("Chat answered=%s sources=%d cited=%d", answered, len(context), len(cited))
+
+        history_id: int | None = None
+        if not request.temporary_chat:
+            # No identity of any kind is stored with a chat.
+            history_id = storage.append_history(
+                provider="openai",
+                model=llm_result.model if llm_result is not None else "",
+                system_prompt=settings.system_prompt,
+                question=request.question,
+                answer=answer,
+                rag_collections=[chunk.collection for chunk in context],
+                rag_hits=len(context),
+                config_snapshot={**settings.model_dump(), "last_metrics": metrics},
+                doc_ids=_doc_ids(context),
+                topics=_topics(context),
+                answered=answered,
+            )
+        return ChatResponse(
+            answer=answer,
+            search_query=prepared.search_query,
+            context=context,
+            citations=cited,
+            answered=answered,
+            metrics=metrics,
+            history_id=history_id or None,
+        )
+
+    async def stream_chat(
+        request: ChatRequest, settings: AppSettings, prepared: Prepared
+    ) -> AsyncIterator[bytes]:
+        def line(event: dict[str, Any]) -> bytes:
+            return (json.dumps(event) + "\n").encode()
+
+        state = StreamState()
+        try:
+            async for piece in svc.llm.chat_stream(
+                settings=settings,
+                question=request.question,
+                context=prepared.context,
+                history=prepared.history,
+                state=state,
+            ):
+                yield line({"type": "delta", "text": piece})
+        except LlmError as exc:
+            logger.warning("Streamed chat failed: %s", exc)
+            yield line({"type": "error", "detail": str(exc)})
+            return
+        response = finish(request, settings, prepared, "".join(state.parts), state.result)
+        yield line({"type": "done", **response.model_dump(mode="json")})
+
+    @app.post("/api/chat", response_model=ChatResponse)
+    async def post_chat(request: ChatRequest) -> Response:
+        settings = storage.get_settings()
+        prepared = await prepare(request, settings)
+        if not prepared.context:
+            # Nothing to answer from: say so and give next steps, without the model.
+            response = finish(request, settings, prepared, config.no_answer_message, None)
+            if request.stream:
+                done = {"type": "done", **response.model_dump(mode="json")}
+                return StreamingResponse(
+                    iter([json.dumps(done) + "\n"]), media_type="application/x-ndjson"
+                )
+            return Response(response.model_dump_json(), media_type="application/json")
+        if request.stream:
+            return StreamingResponse(
+                stream_chat(request, settings, prepared), media_type="application/x-ndjson"
+            )
         try:
             llm_result = await svc.llm.chat(
                 settings=settings,
                 question=request.question,
-                context=context,
+                context=prepared.context,
+                history=prepared.history,
             )
         except LlmError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        total_latency_ms = (perf_counter() - request_started) * 1000.0
-
-        # Metrics are a free-form JSON object returned to the UI and stored.
-        metrics: dict[str, Any] = {
-            "total_latency_ms": round(total_latency_ms, 2),
-            "rag_latency_ms": round(rag_latency_ms, 2),
-            "llm_latency_ms": round(llm_result.llm_latency_ms, 2),
-            "prompt_tokens": llm_result.input_tokens,
-            "completion_tokens": llm_result.output_tokens,
-            "total_tokens": llm_result.total_tokens,
-            "tokens_per_second": (
-                round(llm_result.tokens_per_second, 2)
-                if isinstance(llm_result.tokens_per_second, int | float)
-                else None
-            ),
-            "context_chunks_used": len(context),
-            "temporary_chat": request.temporary_chat,
-            "history_saved": not request.temporary_chat,
-            "model": llm_result.model,
-            "provider_metrics": llm_result.provider_metrics,
-        }
-
-        history_id: int | None = None
-        if request.temporary_chat:
-            logger.info("Temporary chat mode enabled; skipping history persistence")
-        else:
-            history_id = storage.append_history(
-                provider="openai",
-                model=llm_result.model,
-                system_prompt=settings.system_prompt,
-                question=request.question,
-                answer=llm_result.answer,
-                rag_collections=[chunk.collection for chunk in context],
-                rag_hits=len(context),
-                config_snapshot={**settings.model_dump(), "last_metrics": metrics},
-            )
-        return ChatResponse(
-            answer=llm_result.answer,
-            context=context,
-            metrics=metrics,
-            history_id=history_id or None,
-        )
+        response = finish(request, settings, prepared, llm_result.answer, llm_result)
+        return Response(response.model_dump_json(), media_type="application/json")
 
     return app

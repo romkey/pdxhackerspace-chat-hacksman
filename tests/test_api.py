@@ -1,6 +1,7 @@
 import asyncio
 import base64
-from collections.abc import Callable
+import json
+from collections.abc import AsyncIterator, Callable
 
 # Any: request bodies are JSON.
 from typing import Any, cast
@@ -11,8 +12,8 @@ from fastapi import FastAPI
 
 from chat_hacksman import __version__
 from chat_hacksman import server as server_module
-from chat_hacksman.llm import LlmError, LlmResult, LlmService
-from chat_hacksman.models import AppSettings, ContextChunk
+from chat_hacksman.llm import LlmError, LlmResult, LlmService, StreamState
+from chat_hacksman.models import AppSettings, ChatTurn, ContextChunk
 from chat_hacksman.rag import RagService
 from tests.conftest import Handler, MakeClient
 
@@ -27,7 +28,7 @@ def settings_payload(system_prompt: str, model: str = "") -> dict[str, Any]:
     }
 
 
-def llm_result(answer: str = "ok") -> LlmResult:
+def llm_result(answer: str = "ok [1]") -> LlmResult:
     return LlmResult(
         answer=answer,
         model="test-model",
@@ -46,7 +47,12 @@ def fake_llm(monkeypatch: pytest.MonkeyPatch) -> list[list[ContextChunk]]:
     calls: list[list[ContextChunk]] = []
 
     async def chat(
-        self: LlmService, *, settings: AppSettings, question: str, context: list[ContextChunk]
+        self: LlmService,
+        *,
+        settings: AppSettings,
+        question: str,
+        context: list[ContextChunk],
+        history: list[ChatTurn] | None = None,
     ) -> LlmResult:
         calls.append(context)
         return llm_result()
@@ -55,15 +61,31 @@ def fake_llm(monkeypatch: pytest.MonkeyPatch) -> list[list[ContextChunk]]:
     return calls
 
 
+FOUND = [
+    ContextChunk(
+        collection="hs_member",
+        score=0.9,
+        text="Safety glasses are required.",
+        metadata={"source": "policy", "doc_id": "ppe", "topics": ["safety"], "authority": 5},
+    )
+]
+
+
 def fake_retrieve(
     monkeypatch: pytest.MonkeyPatch, chunks: list[ContextChunk] | None = None
-) -> None:
+) -> list[str]:
+    """Retrieval finds `chunks` (FOUND by default); returns the queries searched."""
+    queries: list[str] = []
+    found = FOUND if chunks is None else chunks
+
     async def retrieve(
         self: RagService, query: str, enabled_collections: list[str] | None = None
     ) -> list[ContextChunk]:
-        return list(chunks or [])
+        queries.append(query)
+        return list(found)
 
     monkeypatch.setattr(RagService, "retrieve", retrieve)
+    return queries
 
 
 def test_healthz_reports_version(make_client: MakeClient) -> None:
@@ -147,25 +169,27 @@ def test_check_llm_availability(mock_http: MockHttp) -> None:
 def test_chat_endpoint_records_history(
     make_client: MakeClient, monkeypatch: pytest.MonkeyPatch, fake_llm: list[list[ContextChunk]]
 ) -> None:
-    fake_retrieve(
-        monkeypatch,
-        [ContextChunk(collection="docs", score=0.9, text="Safety glasses are required.")],
-    )
+    fake_retrieve(monkeypatch)
 
-    with make_client(rag_collections=("docs",)) as client:
-        response = client.post(
-            "/api/chat", json={"question": "What PPE do I need?", "use_rag": True}
-        )
+    with make_client() as client:
+        response = client.post("/api/chat", json={"question": "What PPE do I need?"})
         assert response.status_code == 200
         body = response.json()
         assert body["metrics"]["completion_tokens"] == 5
         assert body["context"][0]["text"] == "Safety glasses are required."
+        assert (body["citations"], body["answered"]) == ([1], True)
+        assert body["search_query"] == "What PPE do I need?"
         assert isinstance(body["history_id"], int)
 
         rows = client.get("/api/history?limit=1").json()
     assert rows[0]["question"] == "What PPE do I need?"
     assert isinstance(rows[0]["prompt_id"], int)
-    assert rows[0]["rag_collections"] == ["docs"]
+    assert rows[0]["rag_collections"] == ["hs_member"]
+    assert (rows[0]["doc_ids"], rows[0]["topics"], rows[0]["answered"]) == (
+        ["policy:ppe"],
+        ["safety"],
+        True,
+    )
 
 
 def test_chat_adds_fallback_events_for_schedule_questions(
@@ -179,17 +203,17 @@ def test_chat_adds_fallback_events_for_schedule_questions(
         "open_to": "members",
         "duration": 60,
     }
-    with make_client(rag_collections=("events",)) as client:
+    fake_retrieve(monkeypatch, [])
+    with make_client() as client:
         services: server_module.Services = cast(FastAPI, client.app).state.services
         services.topics._cache_occurrences = [occurrence]
-        response = client.post(
-            "/api/chat", json={"question": "what events are upcoming", "use_rag": True}
-        )
+        response = client.post("/api/chat", json={"question": "what events are upcoming"})
     assert response.status_code == 200
     (context,) = fake_llm
     assert [chunk.text for chunk in context] == [
         "Laser training at 2100-01-01T00:00:00Z (open_to=members)"
     ]
+    assert context[0].metadata["source"] == "event"
 
 
 def test_history_links_saved_chats_to_prompt_ids(
@@ -235,9 +259,7 @@ def test_temporary_chat_not_saved_to_history(
 ) -> None:
     fake_retrieve(monkeypatch)
     with make_client() as client:
-        chat_resp = client.post(
-            "/api/chat", json={"question": "private", "use_rag": False, "temporary_chat": True}
-        )
+        chat_resp = client.post("/api/chat", json={"question": "private", "temporary_chat": True})
         assert chat_resp.status_code == 200
         assert chat_resp.json()["metrics"]["history_saved"] is False
         assert client.get("/api/history?limit=10").json() == []
@@ -249,14 +271,19 @@ def test_chat_endpoint_returns_502_when_llm_fails(
     fake_retrieve(monkeypatch)
 
     async def failing_chat(
-        self: LlmService, *, settings: AppSettings, question: str, context: list[ContextChunk]
+        self: LlmService,
+        *,
+        settings: AppSettings,
+        question: str,
+        context: list[ContextChunk],
+        history: list[ChatTurn] | None = None,
     ) -> LlmResult:
         raise LlmError("model transport failed")
 
     monkeypatch.setattr(LlmService, "chat", failing_chat)
 
     with make_client() as client:
-        response = client.post("/api/chat", json={"question": "ping", "use_rag": False})
+        response = client.post("/api/chat", json={"question": "ping"})
     assert response.status_code == 502
     assert response.json()["detail"] == "model transport failed"
 
@@ -388,3 +415,170 @@ def test_topics_endpoint_returns_502_when_feed_fails(
     with make_client() as client:
         response = client.get("/api/topics")
     assert response.status_code == 502
+
+
+def test_no_sources_gives_the_no_answer_message_without_the_model(
+    make_client: MakeClient, monkeypatch: pytest.MonkeyPatch, fake_llm: list[list[ContextChunk]]
+) -> None:
+    fake_retrieve(monkeypatch, [])
+    with make_client(no_answer_message="Ask in #general.") as client:
+        body = client.post("/api/chat", json={"question": "Where is the moon rock?"}).json()
+        streamed = client.post(
+            "/api/chat", json={"question": "Where is the moon rock?", "stream": True}
+        )
+        rows = client.get("/api/history?limit=1").json()
+    assert fake_llm == []
+    assert (body["answer"], body["answered"], body["context"]) == ("Ask in #general.", False, [])
+    (event,) = [json.loads(line) for line in streamed.text.splitlines()]
+    assert (event["type"], event["answer"]) == ("done", "Ask in #general.")
+    assert rows[0]["answered"] is False
+
+
+def test_answer_without_citations_is_not_answered(
+    make_client: MakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_retrieve(monkeypatch)
+
+    async def chat(self: LlmService, **kwargs: Any) -> LlmResult:  # Any: chat's keywords.
+        return llm_result("I think so.")
+
+    monkeypatch.setattr(LlmService, "chat", chat)
+    with make_client() as client:
+        body = client.post("/api/chat", json={"question": "q"}).json()
+    assert (body["citations"], body["answered"]) == ([], False)
+
+
+def test_history_is_rewritten_into_the_search_query_and_sent_to_the_model(
+    make_client: MakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queries = fake_retrieve(monkeypatch)
+    seen: list[list[ChatTurn]] = []
+
+    async def rewrite_query(
+        self: LlmService, *, settings: AppSettings, question: str, history: list[ChatTurn]
+    ) -> str:
+        return f"{history[-1].content} / {question}"
+
+    async def chat(
+        self: LlmService,
+        *,
+        settings: AppSettings,
+        question: str,
+        context: list[ContextChunk],
+        history: list[ChatTurn] | None = None,
+    ) -> LlmResult:
+        seen.append(history or [])
+        return llm_result()
+
+    monkeypatch.setattr(LlmService, "rewrite_query", rewrite_query)
+    monkeypatch.setattr(LlmService, "chat", chat)
+    history = [
+        {"role": "user", "content": "old"},
+        {"role": "assistant", "content": "older answer"},
+        {"role": "user", "content": "the laser"},
+    ]
+    with make_client(chat_history_turns=2) as client:
+        body = client.post("/api/chat", json={"question": "training?", "history": history}).json()
+    assert queries == ["the laser / training?"]
+    assert body["search_query"] == "the laser / training?"
+    assert [turn.content for turn in seen[0]] == ["older answer", "the laser"]
+
+
+def test_streamed_chat_sends_deltas_then_the_response(
+    make_client: MakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_retrieve(monkeypatch)
+
+    async def chat_stream(
+        self: LlmService, *, state: StreamState, **kwargs: Any
+    ) -> AsyncIterator[str]:  # Any: chat_stream's keywords.
+        for piece in ("Wear ", "glasses [1]."):
+            state.parts.append(piece)
+            yield piece
+        state.result = llm_result("".join(state.parts))
+
+    monkeypatch.setattr(LlmService, "chat_stream", chat_stream)
+    with make_client() as client:
+        response = client.post("/api/chat", json={"question": "PPE?", "stream": True})
+        rows = client.get("/api/history?limit=1").json()
+    assert response.headers["content-type"].startswith("application/x-ndjson")
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert [event["type"] for event in events] == ["delta", "delta", "done"]
+    assert events[-1]["answer"] == "Wear glasses [1]."
+    assert events[-1]["citations"] == [1]
+    assert rows[0]["answer"] == "Wear glasses [1]."
+
+
+def test_streamed_chat_reports_model_errors(
+    make_client: MakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_retrieve(monkeypatch)
+
+    async def chat_stream(
+        self: LlmService, *, state: StreamState, **kwargs: Any
+    ) -> AsyncIterator[str]:  # Any: chat_stream's keywords.
+        raise LlmError("model down")
+        yield ""
+
+    monkeypatch.setattr(LlmService, "chat_stream", chat_stream)
+    with make_client() as client:
+        response = client.post("/api/chat", json={"question": "PPE?", "stream": True})
+        assert client.get("/api/history?limit=1").json() == []
+    assert [json.loads(line) for line in response.text.splitlines()] == [
+        {"type": "error", "detail": "model down"}
+    ]
+
+
+def test_reports_list_unanswered_questions_and_negative_feedback(
+    make_client: MakeClient, monkeypatch: pytest.MonkeyPatch, fake_llm: list[list[ContextChunk]]
+) -> None:
+    with make_client() as client:
+        fake_retrieve(monkeypatch, [])
+        client.post("/api/chat", json={"question": "Where is the moon rock?"})
+        client.post("/api/chat", json={"question": "Who has the van keys?"})
+        fake_retrieve(monkeypatch)
+        answered = client.post("/api/chat", json={"question": "PPE?"}).json()
+        client.post(
+            "/api/feedback",
+            json={
+                "rating": "down",
+                "text": "out of date",
+                "history_id": answered["history_id"],
+                "question": "PPE?",
+                "answer": answered["answer"],
+            },
+        )
+        client.post("/api/feedback", json={"rating": "up", "question": "x"})
+        unanswered = client.get("/api/reports/unanswered?days=7").json()
+        negative = client.get("/api/reports/negative-feedback").json()
+    assert unanswered["total"] == 2
+    (group,) = unanswered["groups"]
+    assert group["topic"] == "unclassified"
+    assert [item["question"] for item in group["questions"]] == [
+        "Where is the moon rock?",
+        "Who has the van keys?",
+    ]
+    (item,) = negative["items"]
+    assert (item["note"], item["question"], item["doc_ids"]) == (
+        "out of date",
+        "PPE?",
+        ["policy:ppe"],
+    )
+
+
+def test_unanswered_report_groups_by_topic(
+    make_client: MakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_retrieve(monkeypatch)
+
+    async def chat(self: LlmService, **kwargs: Any) -> LlmResult:  # Any: chat's keywords.
+        return llm_result("No citation.")
+
+    monkeypatch.setattr(LlmService, "chat", chat)
+    with make_client() as client:
+        client.post("/api/chat", json={"question": "a"})
+        client.post("/api/chat", json={"question": "b"})
+        report = client.get("/api/reports/unanswered").json()
+    assert [(group["topic"], len(group["questions"])) for group in report["groups"]] == [
+        ("safety", 2)
+    ]

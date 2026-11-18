@@ -3,7 +3,7 @@ import sqlite3
 from pathlib import Path
 
 from chat_hacksman.models import AppSettings
-from chat_hacksman.storage import Storage
+from chat_hacksman.storage import OLD_DEFAULT_SYSTEM_PROMPT, Storage
 
 
 def test_storage_upsert_and_get_events(tmp_path: Path) -> None:
@@ -124,7 +124,8 @@ def test_version_1_settings_lose_the_old_provider_fields(tmp_path: Path) -> None
     settings = storage.get_settings()
     assert settings.model == ""
     assert settings.system_prompt == "kept"
-    assert settings.enabled_rag_collections == ["docs"]
+    # Schema 3 resets the old per-source collections to the default.
+    assert settings.enabled_rag_collections == []
     assert (settings.tweaks.max_tokens, settings.tweaks.seed) == (100, 3)
     with sqlite3.connect(db_path) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
@@ -132,7 +133,7 @@ def test_version_1_settings_lose_the_old_provider_fields(tmp_path: Path) -> None
         stored = json.loads(conn.execute("SELECT payload_json FROM app_settings").fetchone()[0])
     conn.close()
     assert "llm_base_url_history" not in tables
-    assert version == 2
+    assert version == 3
     assert "provider" not in stored
     assert "num_ctx" not in stored["tweaks"]
 
@@ -140,3 +141,33 @@ def test_version_1_settings_lose_the_old_provider_fields(tmp_path: Path) -> None
     storage.save_settings(settings.model_copy(update={"model": "picked"}))
     reopened = Storage(db_path=db_path, default_settings=AppSettings(system_prompt="default"))
     assert reopened.get_settings().model == "picked"
+
+
+def test_version_2_drops_the_old_default_prompt_and_adds_answer_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / "v2.db"
+    Storage(db_path=db_path, default_settings=AppSettings(system_prompt="x"))
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("ALTER TABLE chat_history DROP COLUMN doc_ids_json")
+        conn.execute("ALTER TABLE chat_history DROP COLUMN topics_json")
+        conn.execute("ALTER TABLE chat_history DROP COLUMN answered")
+        payload = {"system_prompt": OLD_DEFAULT_SYSTEM_PROMPT, "enabled_rag_collections": ["slack"]}
+        conn.execute("INSERT INTO app_settings VALUES (1, ?, 'then')", (json.dumps(payload),))
+        conn.execute("PRAGMA user_version = 2")
+    conn.close()
+
+    storage = Storage(db_path=db_path, default_settings=AppSettings(system_prompt="member bot"))
+    settings = storage.get_settings()
+    assert settings.system_prompt == "member bot"
+    assert settings.enabled_rag_collections == []
+    storage.append_history(
+        provider="openai",
+        model="m",
+        system_prompt="p",
+        question="q",
+        answer="a",
+        rag_collections=[],
+        rag_hits=0,
+        config_snapshot={},
+    )
+    (record,) = storage.get_history()
+    assert (record.doc_ids, record.topics, record.answered) == ([], [], None)

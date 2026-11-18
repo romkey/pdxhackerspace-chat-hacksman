@@ -161,6 +161,12 @@
         font-size: 0.82rem;
       }
       .muted { color: #9ca3af; font-size: 0.85rem; }
+      #conversation { max-height: 60vh; overflow-y: auto; font-family: system-ui, sans-serif; }
+      .turn { margin-bottom: 0.9rem; }
+      .turn-question { margin: 0 0 0.3rem; font-weight: 600; color: #bfdbfe; white-space: pre-wrap; }
+      .turn-answer { margin: 0; white-space: pre-wrap; }
+      .turn-sources { margin: 0.4rem 0 0; padding-left: 1.4rem; font-size: 0.85rem; color: #9ca3af; }
+      .turn-sources a { color: #93c5fd; }
       .footer { margin-top: auto; border-top: 1px solid #374151; padding: 0.75rem 1rem; color: #9ca3af; font-size: 0.85rem; text-align: center; }
       .footer a { color: #93c5fd; text-decoration: none; }
       .footer a:hover { text-decoration: underline; }
@@ -252,10 +258,7 @@
           </div>
           <div class="row">
             <button id="ask">Ask</button>
-            <label class="muted label-with-help">
-              <input id="use-rag" type="checkbox" checked /> Use RAG
-              <button class="help-tip" data-help="When enabled, relevant chunks from selected Qdrant collections are injected into context." type="button">?</button>
-            </label>
+            <button id="new-conversation" type="button">New Conversation</button>
           </div>
           <h4>Recorded Chats</h4>
           <p class="muted">Chats are recorded by default and appear in History.</p>
@@ -268,13 +271,14 @@
           <h4>Response</h4>
           <div class="response-panel" id="response-panel">
             <div class="response-header">
-              <span class="response-title">Latest Reply</span>
+              <span class="response-title">Conversation</span>
             </div>
             <div id="response">
               <div id="response-loading" class="response-loading" hidden>
                 <span class="spinner" aria-hidden="true"></span>
-                <span>Generating response...</span>
+                <span>Searching...</span>
               </div>
+              <div id="conversation"></div>
             </div>
           </div>
           <div class="feedback-row">
@@ -319,6 +323,6 @@
     <footer class="footer">
       <span id="footer-meta">Chat Hacksman</span>
     </footer>
-    <script src="/static/app.js?v=0.4.4-2"></script>
+    <script src="/static/app.js?v=0.9.0"></script>
   </body>
   </html>

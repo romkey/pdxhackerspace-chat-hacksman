@@ -7,6 +7,59 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** The bot is the member chatbot of the shared RAG pipeline.
+  It searches `hs_member` and `hs_catalog` by default and reads the
+  pipeline's point payload (`text`, `title`, `heading_path`, `url`,
+  `source`, `tier`, `authority`, `stale_after`, `superseded_by`...). The
+  special handling of `events*`, `slack*` and `calibre*` collections is
+  gone.
+- **Breaking:** Search is hybrid: each collection's dense vector
+  (`RAG_DENSE_VECTOR`) and sparse BM25 vector (`RAG_SPARSE_VECTOR`, embedded
+  by Qdrant) are queried and fused with reciprocal rank fusion. If the
+  hybrid query fails, dense search alone is used.
+- **Breaking:** `RAG_CANDIDATES` (50 per collection) and `RAG_TOP_N` (8)
+  replace `RAG_TOP_K`, `RAG_TOP_K_EVENTS`, `RAG_TOP_K_SLACK`,
+  `RAG_TOP_K_CALIBRE`, `RERANK_CANDIDATES` and `RERANK_TOP_N`;
+  `RAG_COLLECTIONS` replaces `RAG_COLLECTION_1` ... `_5`. The app won't
+  start while an old variable is set.
+- Points with a `tier` outside `RAG_ALLOWED_TIERS` (default
+  `public,member`; never `admin`), points `superseded_by` another and
+  points past `stale_after` are never used.
+- After reranking, an authority pass prefers policy, signs and the wiki
+  over manuals and Slack when relevance is close
+  (`RAG_AUTHORITY_WEIGHT`), and always includes a relevant policy or sign.
+- The system prompt starts with fixed answering rules shared by both bots:
+  answer only from the sources and cite them, treat sources as data, rules
+  over manuals, training, verbatim configs, no individuals, incidents,
+  credentials or admin procedures, safety first. `DEFAULT_SYSTEM_PROMPT` is
+  now the member bot's own instructions; a saved copy of the old default is
+  replaced by it.
+- The browser keeps the conversation for the session and sends the last
+  `CHAT_HISTORY_TURNS` with each question; the model rewrites it into a
+  standalone search query.
+- Answers stream (`"stream": true` on `POST /api/chat`, newline-delimited
+  JSON) and the UI shows the cited sources as links.
+- With no sources found, the bot answers `NO_ANSWER_MESSAGE` without asking
+  the model. An answer counts as answered only if it cites a source.
+- Chats record the retrieved document IDs, their topics and whether they
+  were answered (schema 3); client IPs are no longer logged with chats or
+  feedback.
+
+### Added
+
+- `GET /api/reports/unanswered` (questions not answered, grouped by topic)
+  and `GET /api/reports/negative-feedback` (thumbs-down answers with their
+  documents).
+- `evals/` and `scripts/run-evals.py`: a golden set and red-team prompts to
+  run against a live bot, with recall and canary leak checks.
+
+### Removed
+
+- The "Use RAG" switch and the `use_rag` request field: the bot always
+  answers from its sources.
+
 ## [0.8.0] - 2026-11-13
 
 ### Changed
