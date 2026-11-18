@@ -7,6 +7,8 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-18
+
 ### Changed
 
 - **Breaking:** The bot is the member chatbot of the shared RAG pipeline.
