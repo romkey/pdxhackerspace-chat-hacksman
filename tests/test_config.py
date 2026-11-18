@@ -16,23 +16,39 @@ def test_defaults() -> None:
     assert not settings.basic_auth_enabled
 
 
-def test_supports_rag_collection_1_to_5_after_list() -> None:
+def test_collections_default_to_the_member_bots() -> None:
+    assert Settings.from_env({}).rag_collections == ("hs_member", "hs_catalog")
+    assert Settings.from_env({"RAG_COLLECTIONS": " a, b ,a,"}).rag_collections == ("a", "b")
+
+
+def test_reads_retrieval_settings() -> None:
     env = {
-        "RAG_COLLECTIONS": "zero, one",
-        "RAG_COLLECTION_1": "one",
-        "RAG_COLLECTION_2": "two",
-        "RAG_COLLECTION_3": "three",
-        "RAG_COLLECTION_4": "four",
-        "RAG_COLLECTION_5": "five",
+        "RAG_CANDIDATES": "30",
+        "RAG_TOP_N": "5",
+        "RAG_DENSE_VECTOR": "none",
+        "RAG_SPARSE_VECTOR": "bm25",
+        "RAG_SPARSE_MODEL": "Qdrant/bm25",
+        "RAG_ALLOWED_TIERS": "member",
+        "RAG_AUTHORITY_WEIGHT": "0.2",
+        "CHAT_HISTORY_TURNS": "0",
+        "NO_ANSWER_MESSAGE": "Ask in #general.",
     }
-    assert Settings.from_env(env).rag_collections == (
-        "zero",
-        "one",
-        "two",
-        "three",
-        "four",
-        "five",
-    )
+    settings = Settings.from_env(env)
+    assert (settings.rag_candidates, settings.rag_top_n) == (30, 5)
+    assert (settings.rag_dense_vector, settings.rag_sparse_vector) == ("", "bm25")
+    assert settings.rag_sparse_model == "Qdrant/bm25"
+    assert settings.rag_allowed_tiers == ("member",)
+    assert settings.rag_authority_weight == 0.2
+    assert settings.chat_history_turns == 0
+    assert settings.no_answer_message == "Ask in #general."
+    defaults = Settings.from_env({})
+    assert (defaults.rag_dense_vector, defaults.rag_sparse_vector) == ("dense", "sparse")
+    assert defaults.rag_allowed_tiers == ("public", "member")
+
+
+def test_admin_tier_is_never_allowed() -> None:
+    with pytest.raises(ConfigError, match="never include admin"):
+        Settings.from_env({"RAG_ALLOWED_TIERS": "member,Admin"})
 
 
 def test_reads_secrets_and_optional_values() -> None:
@@ -55,20 +71,12 @@ def test_reads_secrets_and_optional_values() -> None:
 def test_reads_numbers() -> None:
     env = {
         "APP_PORT": "9000",
-        "RAG_TOP_K_EVENTS": "7",
-        "RAG_TOP_K_SLACK": "6",
-        "RAG_TOP_K_CALIBRE": "5",
         "RAG_MIN_SCORE": "0.25",
         "EMBEDDING_CONTEXT_LENGTH": "2048",
         "LLM_TIMEOUT_SECONDS": "60",
     }
     settings = Settings.from_env(env)
     assert settings.port == 9000
-    assert (settings.rag_top_k_events, settings.rag_top_k_slack, settings.rag_top_k_calibre) == (
-        7,
-        6,
-        5,
-    )
     assert settings.rag_min_score == 0.25
     assert settings.embedding_context_length == 2048
     assert settings.llm_timeout_seconds == 60.0
@@ -86,7 +94,8 @@ def test_strips_trailing_slash_from_urls() -> None:
         ("APP_PORT", "eighty", "APP_PORT must be a whole number"),
         ("APP_PORT", "0", "APP_PORT must be at least 1"),
         ("APP_PORT", "65536", "APP_PORT must be 1-65535"),
-        ("RAG_TOP_K", "0", "RAG_TOP_K must be at least 1"),
+        ("RAG_TOP_N", "0", "RAG_TOP_N must be at least 1"),
+        ("RAG_CANDIDATES", "0", "RAG_CANDIDATES must be at least 1"),
         ("RAG_MIN_SCORE", "high", "RAG_MIN_SCORE must be a number"),
         ("LLM_TIMEOUT_SECONDS", "-1", "LLM_TIMEOUT_SECONDS must be at least"),
         ("LOG_LEVEL", "loud", "LOG_LEVEL"),
@@ -156,8 +165,6 @@ def test_reranking_is_off_by_default() -> None:
     assert settings.rerank_url is None
     assert settings.rerank_api == "jina"
     assert settings.rerank_model == "BAAI/bge-reranker-v2-m3"
-    assert settings.rerank_candidates == 10
-    assert settings.rerank_top_n is None
     assert settings.rerank_min_score is None
 
 
@@ -167,8 +174,6 @@ def test_reads_rerank_settings() -> None:
         "RERANK_API": "TEI",
         "RERANK_API_KEY": "dummy-rerank-key",
         "RERANK_MODEL": "Alibaba-NLP/gte-reranker-modernbert-base",
-        "RERANK_CANDIDATES": "25",
-        "RERANK_TOP_N": "6",
         "RERANK_MIN_SCORE": "0.1",
         "RERANK_CONTEXT_LENGTH": "512",
         "RERANK_TIMEOUT_SECONDS": "10",
@@ -178,7 +183,6 @@ def test_reads_rerank_settings() -> None:
     assert settings.rerank_api == "tei"
     assert settings.rerank_api_key == "dummy-rerank-key"
     assert settings.rerank_model == "Alibaba-NLP/gte-reranker-modernbert-base"
-    assert (settings.rerank_candidates, settings.rerank_top_n) == (25, 6)
     assert settings.rerank_min_score == 0.1
     assert settings.rerank_context_length == 512
     assert settings.rerank_timeout_seconds == 10.0
@@ -189,8 +193,6 @@ def test_reads_rerank_settings() -> None:
     [
         ("RERANK_API", "cohere", "RERANK_API must be one of jina, tei"),
         ("RERANK_URL", "tei.local", "RERANK_URL must be an http"),
-        ("RERANK_CANDIDATES", "0", "RERANK_CANDIDATES must be at least 1"),
-        ("RERANK_TOP_N", "0", "RERANK_TOP_N must be at least 1"),
         ("RERANK_MIN_SCORE", "low", "RERANK_MIN_SCORE must be a number"),
     ],
 )
@@ -220,6 +222,10 @@ def test_llm_settings() -> None:
         ("DEFAULT_LLM_BASE_URL", "LLM_URL"),
         ("DEFAULT_MODEL", "LLM_MODEL"),
         ("OLLAMA_API_KEY", "LLM_API_KEY"),
+        ("RAG_COLLECTION_1", "RAG_COLLECTIONS"),
+        ("RAG_TOP_K_SLACK", "RAG_CANDIDATES and RAG_TOP_N"),
+        ("RERANK_CANDIDATES", "RAG_CANDIDATES"),
+        ("RERANK_TOP_N", "RAG_TOP_N"),
     ],
 )
 def test_rejects_removed_variables(name: str, replacement: str) -> None:

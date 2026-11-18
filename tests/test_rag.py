@@ -1,134 +1,318 @@
 import asyncio
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import cast
+
+# Any: fake Qdrant client calls take the real client's keyword arguments.
+from typing import Any
 
 import httpx
 import pytest
-from qdrant_client import QdrantClient
+from qdrant_client.http.models import (
+    Distance,
+    Document,
+    Filter,
+    FusionQuery,
+    VectorParams,
+)
 
-from chat_hacksman.rag import RagService, _extract_chunk_text
+from chat_hacksman import rag as rag_module
+from chat_hacksman.models import ContextChunk
+from chat_hacksman.rag import RagService, select_chunks
+from chat_hacksman.rerank import Reranker
 from tests.conftest import Handler
 
 
-def _service() -> RagService:
-    return RagService(
+def _service(**overrides: Any) -> RagService:  # Any: RagService fields have mixed types.
+    service = RagService(
         qdrant_url="http://localhost:6333",
         qdrant_api_key=None,
-        collections=["wiki"],
+        collections=["hs_member", "hs_catalog"],
         embedding_url="http://localhost:11434",
         embedding_model="nomic-embed-text",
-        top_k=2,
+        candidates=50,
+        top_n=8,
     )
+    for name, value in overrides.items():
+        setattr(service, name, value)
+    return service
 
 
-def test_rag_retrieve_works_with_legacy_search_api(monkeypatch: pytest.MonkeyPatch) -> None:
-    service = _service()
+def _hit(text: str, score: float, **payload: object) -> SimpleNamespace:
+    return SimpleNamespace(payload={"text": text, "tier": "member", **payload}, score=score)
 
+
+class FakeClient:
+    """Records query_points calls; answers each collection with its hits."""
+
+    def __init__(
+        self,
+        hits: dict[str, list[SimpleNamespace]],
+        dims: dict[str, int] | None = None,
+        fail_hybrid: bool = False,
+    ) -> None:
+        self.hits = hits
+        self.dims = dims or {}
+        self.fail_hybrid = fail_hybrid
+        self.calls: list[dict[str, Any]] = []
+
+    def get_collection(self, *, collection_name: str) -> SimpleNamespace:
+        size = self.dims.get(collection_name, 3)
+        vectors = {"dense": VectorParams(size=size, distance=Distance.COSINE)}
+        return SimpleNamespace(config=SimpleNamespace(params=SimpleNamespace(vectors=vectors)))
+
+    def query_points(self, **kwargs: Any) -> SimpleNamespace:
+        self.calls.append(kwargs)
+        if self.fail_hybrid and "prefetch" in kwargs:
+            raise RuntimeError("no BM25 inference here")
+        return SimpleNamespace(points=list(self.hits.get(kwargs["collection_name"], [])))
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, service: RagService, client: FakeClient) -> None:
     async def fake_embed_query(self: RagService, _: str) -> list[float]:
         return [0.1, 0.2, 0.3]
 
-    class FakeClient:
-        def search(
-            self, *, collection_name: str, query_vector: object, with_payload: bool, limit: int
-        ) -> list[SimpleNamespace]:
-            del query_vector, with_payload, limit
-            return [
-                SimpleNamespace(
-                    payload={"text": f"Result from {collection_name}"},
-                    score=0.9,
-                )
-            ]
-
-    monkeypatch.setattr(type(service), "_embed_query", fake_embed_query)
-    monkeypatch.setattr(type(service), "_make_qdrant_client", lambda self: FakeClient())
-
-    results = asyncio.run(service.retrieve("test query", enabled_collections=["wiki"]))
-    assert len(results) == 1
-    assert results[0].collection == "wiki"
-    assert "Result from wiki" in results[0].text
+    monkeypatch.setattr(RagService, "_embed_query", fake_embed_query)
+    monkeypatch.setattr(RagService, "_make_qdrant_client", lambda self: client)
 
 
-def test_rag_retrieve_works_with_query_points_api(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hybrid_search_fuses_dense_and_sparse(monkeypatch: pytest.MonkeyPatch) -> None:
     service = _service()
+    client = FakeClient({"hs_member": [_hit("Badge in at the front door.", 0.03)]})
+    _install(monkeypatch, service, client)
 
-    async def fake_embed_query(self: RagService, _: str) -> list[float]:
-        return [0.1, 0.2, 0.3]
+    results = asyncio.run(service.retrieve("how do I get in?"))
 
-    class FakeClient:
-        def query_points(
-            self, *, collection_name: str, query: object, with_payload: bool, limit: int
-        ) -> SimpleNamespace:
-            del query, with_payload, limit
-            return SimpleNamespace(
-                points=[
-                    SimpleNamespace(
-                        payload={"text": f"Point from {collection_name}"},
-                        score=0.8,
-                    )
-                ]
-            )
-
-    monkeypatch.setattr(type(service), "_embed_query", fake_embed_query)
-    monkeypatch.setattr(type(service), "_make_qdrant_client", lambda self: FakeClient())
-
-    results = asyncio.run(service.retrieve("test query", enabled_collections=["wiki"]))
-    assert len(results) == 1
-    assert results[0].collection == "wiki"
-    assert "Point from wiki" in results[0].text
+    assert [chunk.text for chunk in results] == ["Badge in at the front door."]
+    assert [call["collection_name"] for call in client.calls] == ["hs_member", "hs_catalog"]
+    call = client.calls[0]
+    assert isinstance(call["query"], FusionQuery)
+    assert call["limit"] == 50
+    dense, sparse = call["prefetch"]
+    assert (dense.using, dense.query, dense.limit) == ("dense", [0.1, 0.2, 0.3], 50)
+    assert sparse.using == "sparse"
+    assert sparse.query == Document(text="how do I get in?", model="qdrant/bm25")
+    assert dense.filter == sparse.filter == service.base_filter(_now_of(dense.filter))
 
 
-def test_rag_retrieve_skips_collection_when_vector_dim_mismatch(
+def _now_of(query_filter: Filter) -> datetime:
+    moment = query_filter.model_dump()["must"][2]["should"][1]["range"]["gt"]
+    assert isinstance(moment, datetime)
+    return moment
+
+
+def test_dense_only_search_without_sparse_vector(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service(sparse_vector="", min_score=0.5)
+    client = FakeClient({"hs_member": [_hit("kept", 0.8), _hit("weak", 0.4)]})
+    _install(monkeypatch, service, client)
+
+    results = asyncio.run(service.retrieve("q", enabled_collections=["hs_member"]))
+
+    assert [chunk.text for chunk in results] == ["kept"]
+    (call,) = client.calls
+    assert "prefetch" not in call
+    assert (call["query"], call["using"]) == ([0.1, 0.2, 0.3], "dense")
+
+
+def test_hybrid_failure_falls_back_to_dense(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service()
+    client = FakeClient({"hs_member": [_hit("found", 0.9)]}, fail_hybrid=True)
+    _install(monkeypatch, service, client)
+
+    results = asyncio.run(service.retrieve("q", enabled_collections=["hs_member"]))
+
+    assert [chunk.text for chunk in results] == ["found"]
+    assert ["prefetch" in call for call in client.calls] == [True, False]
+
+
+def test_base_filter_excludes_other_tiers_superseded_and_stale() -> None:
+    moment = datetime(2026, 11, 17, tzinfo=UTC)
+    dumped = _service().base_filter(moment).model_dump(exclude_none=True)
+    tier, superseded, stale = dumped["must"]
+    assert tier == {"key": "tier", "match": {"any": ["public", "member"]}}
+    assert superseded == {"is_empty": {"key": "superseded_by"}}
+    assert stale == {
+        "should": [
+            {"is_empty": {"key": "stale_after"}},
+            {"key": "stale_after", "range": {"gt": moment}},
+        ]
+    }
+
+
+def test_retrieve_skips_unknown_collections_and_dimension_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service()
+    client = FakeClient(
+        {"hs_member": [_hit("a", 0.9)], "hs_catalog": [_hit("b", 0.9)]}, dims={"hs_catalog": 768}
+    )
+    _install(monkeypatch, service, client)
+
+    results = asyncio.run(
+        service.retrieve("q", enabled_collections=["hs_member", "hs_catalog", "x"])
+    )
+
+    assert [chunk.collection for chunk in results] == ["hs_member"]
+    assert [call["collection_name"] for call in client.calls] == ["hs_member"]
+    assert asyncio.run(service.retrieve("q", enabled_collections=["x"])) == []
+
+
+def test_retrieve_drops_points_without_text_and_survives_search_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(sparse_vector="")
+    client = FakeClient({"hs_member": [SimpleNamespace(payload={"title": "no text"}, score=0.9)]})
+
+    def query_points(**kwargs: Any) -> SimpleNamespace:
+        if kwargs["collection_name"] == "hs_catalog":
+            raise RuntimeError("down")
+        return FakeClient.query_points(client, **kwargs)
+
+    client.query_points = query_points  # type: ignore[method-assign]
+    _install(monkeypatch, service, client)
+    assert asyncio.run(service.retrieve("q")) == []
+
+
+def test_retrieve_returns_nothing_when_embedding_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def no_embedding(self: RagService, _: str) -> None:
+        return None
+
+    monkeypatch.setattr(RagService, "_embed_query", no_embedding)
+    assert asyncio.run(_service().retrieve("q")) == []
+
+
+def test_reranks_candidates_from_every_collection_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[list[str]] = []
+
+    async def rerank(self: Reranker, query: str, documents: list[str]) -> list[float]:
+        sent.append(documents)
+        return [0.1 if "member" in doc else 0.9 for doc in documents]
+
+    monkeypatch.setattr(Reranker, "rerank", rerank)
+    service = _service(
+        reranker=Reranker(url="http://rerank.local", model="m"), top_n=1, rerank_min_score=0.05
+    )
+    client = FakeClient(
+        {
+            "hs_member": [_hit("member text", 0.05, title="Wiki", heading_path="Access")],
+            "hs_catalog": [_hit("catalog text", 0.01)],
+        }
+    )
+    _install(monkeypatch, service, client)
+
+    results = asyncio.run(service.retrieve("q"))
+
+    assert sent == [["Wiki > Access\nmember text", "catalog text"]]
+    assert [(chunk.text, chunk.rerank_score) for chunk in results] == [("catalog text", 0.9)]
+
+
+def test_rerank_min_score_can_leave_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def rerank(self: Reranker, query: str, documents: list[str]) -> list[float]:
+        return [-5.0 for _ in documents]
+
+    monkeypatch.setattr(Reranker, "rerank", rerank)
+    service = _service(
+        reranker=Reranker(url="http://rerank.local", model="m"), rerank_min_score=0.0
+    )
+    _install(monkeypatch, service, FakeClient({"hs_member": [_hit("weak", 0.02)]}))
+    assert asyncio.run(service.retrieve("q")) == []
+
+
+def test_reranker_failure_keeps_search_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def rerank(self: Reranker, query: str, documents: list[str]) -> None:
+        return None
+
+    monkeypatch.setattr(Reranker, "rerank", rerank)
+    service = _service(reranker=Reranker(url="http://rerank.local", model="m"))
+    _install(
+        monkeypatch, service, FakeClient({"hs_member": [_hit("second", 0.02), _hit("first", 0.03)]})
+    )
+    assert [chunk.text for chunk in asyncio.run(service.retrieve("q"))] == ["first", "second"]
+
+
+def _chunk(text: str, rerank_score: float, authority: int | None = None) -> ContextChunk:
+    metadata: dict[str, object] = {} if authority is None else {"authority": authority}
+    return ContextChunk(
+        collection="hs_member", score=0.0, text=text, rerank_score=rerank_score, metadata=metadata
+    )
+
+
+def test_authority_breaks_near_ties() -> None:
+    chunks = [_chunk("slack fact", 0.81, 1), _chunk("wiki page", 0.80, 4), _chunk("low", 0.0, 5)]
+    assert [chunk.text for chunk in select_chunks(chunks, 1, 0.1)] == ["wiki page"]
+    # Without the authority weight, relevance alone decides.
+    assert [chunk.text for chunk in select_chunks(chunks, 1, 0.0)] == ["slack fact"]
+
+
+def test_authority_does_not_beat_much_better_relevance() -> None:
+    chunks = [_chunk("manual", 0.9, 2), _chunk("sign", 0.3, 5), _chunk("other", 0.0, 1)]
+    assert select_chunks(chunks, 1, 0.1)[0].text == "manual"
+
+
+def test_relevant_policy_chunk_is_always_included() -> None:
+    chunks = [
+        _chunk("a", 1.0),
+        _chunk("b", 0.95),
+        _chunk("c", 0.9),
+        _chunk("policy", 0.6, 5),
+        _chunk("irrelevant policy", 0.1, 5),
+        _chunk("floor", 0.0),
+    ]
+    assert [chunk.text for chunk in select_chunks(chunks, 3, 0.0)] == ["a", "b", "policy"]
+
+
+def test_irrelevant_policy_chunk_is_not_forced_in() -> None:
+    chunks = [_chunk("a", 1.0), _chunk("b", 0.9), _chunk("policy", 0.2, 5), _chunk("z", 0.0)]
+    assert [chunk.text for chunk in select_chunks(chunks, 2, 0.0)] == ["a", "b"]
+
+
+def test_select_chunks_edge_cases() -> None:
+    assert select_chunks([], 8, 0.1) == []
+    same = [_chunk("x", 0.5, 7), _chunk("y", 0.5, True)]
+    # Equal relevance: authority (capped at 5; a bool isn't one) decides.
+    assert [chunk.text for chunk in select_chunks(same, 2, 0.1)] == ["x", "y"]
+
+
+def test_reuses_one_qdrant_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service()
+    made: list[FakeClient] = []
+
+    def make(self: RagService) -> FakeClient:
+        made.append(FakeClient({}))
+        return made[-1]
 
     async def fake_embed_query(self: RagService, _: str) -> list[float]:
-        return [0.1, 0.2, 0.3, 0.4]
+        return [0.1, 0.2, 0.3]
 
-    class FakeClient:
-        def get_collection(self, *, collection_name: str) -> SimpleNamespace:
-            del collection_name
-            return SimpleNamespace(
-                config=SimpleNamespace(params=SimpleNamespace(vectors=SimpleNamespace(size=3)))
-            )
-
-        def query_points(
-            self, *, collection_name: str, query: object, with_payload: bool, limit: int
-        ) -> SimpleNamespace:
-            del collection_name, query, with_payload, limit
-            raise AssertionError("query_points should not be called on dimension mismatch")
-
-    monkeypatch.setattr(type(service), "_embed_query", fake_embed_query)
-    monkeypatch.setattr(type(service), "_make_qdrant_client", lambda self: FakeClient())
-
-    results = asyncio.run(service.retrieve("test query", enabled_collections=["wiki"]))
-    assert results == []
+    monkeypatch.setattr(RagService, "_embed_query", fake_embed_query)
+    monkeypatch.setattr(RagService, "_make_qdrant_client", make)
+    asyncio.run(service.retrieve("one"))
+    asyncio.run(service.retrieve("two"))
+    assert len(made) == 1
 
 
-def test_extract_chunk_text_prefers_chunk_text() -> None:
-    payload = {"text": "fallback", "chunk_text": "ebook body"}
-    assert _extract_chunk_text(payload) == "ebook body"
+def test_qdrant_client_sends_sparse_queries_to_the_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    made: list[dict[str, Any]] = []
+    monkeypatch.setattr(rag_module, "QdrantClient", lambda **kwargs: made.append(kwargs))
+    _service()._make_qdrant_client()
+    _service(sparse_vector="")._make_qdrant_client()
+    assert [kwargs["cloud_inference"] for kwargs in made] == [True, False]
 
 
-def test_extract_chunk_text_prefers_slack_summary_for_thread_summary() -> None:
-    payload = {
-        "doc_type": "thread_summary",
-        "channel_name": "ops",
-        "summary": "Summary of the thread",
-        "text": "Raw thread message",
-    }
-    assert _extract_chunk_text(payload) == "Summary of the thread"
+def test_vector_dim_for_unnamed_and_named_vectors() -> None:
+    def info(vectors: object) -> SimpleNamespace:
+        return SimpleNamespace(config=SimpleNamespace(params=SimpleNamespace(vectors=vectors)))
 
-
-def test_extract_chunk_text_does_not_treat_doc_type_alone_as_slack() -> None:
-    payload = {
-        "doc_type": "event_summary",
-        "chunk_text": "Canonical event text",
-        "summary": "This should not override chunk_text",
-    }
-    assert _extract_chunk_text(payload) == "Canonical event text"
+    unnamed = VectorParams(size=768, distance=Distance.COSINE)
+    assert _service(dense_vector="")._extract_vector_dim(info(unnamed)) == 768
+    assert _service()._extract_vector_dim(info(unnamed)) is None
+    assert _service()._extract_vector_dim(info({"other": unnamed})) is None
+    assert _service()._extract_vector_dim(info(None)) is None
 
 
 def _embedding_response(vector: list[float]) -> httpx.Response:
@@ -251,242 +435,3 @@ def test_embed_query_truncates_long_single_token_input(monkeypatch: pytest.Monke
 
     asyncio.run(service._embed_query("x" * 1000))
     assert len(captured["text"]) == 128
-
-
-def test_rag_retrieve_applies_min_score(monkeypatch: pytest.MonkeyPatch) -> None:
-    service = _service()
-    service.min_score = 0.5
-
-    async def fake_embed_query(self: RagService, _: str) -> list[float]:
-        return [0.1, 0.2, 0.3]
-
-    class FakeClient:
-        def query_points(
-            self,
-            *,
-            collection_name: str,
-            query: object,
-            query_filter: object,
-            with_payload: bool,
-            limit: int,
-        ) -> SimpleNamespace:
-            del collection_name, query, query_filter, with_payload, limit
-            return SimpleNamespace(
-                points=[
-                    SimpleNamespace(payload={"text": "low score"}, score=0.2),
-                    SimpleNamespace(payload={"text": "high score"}, score=0.9),
-                ]
-            )
-
-    monkeypatch.setattr(type(service), "_embed_query", fake_embed_query)
-    monkeypatch.setattr(type(service), "_make_qdrant_client", lambda self: FakeClient())
-
-    results = asyncio.run(service.retrieve("test query", enabled_collections=["wiki"]))
-    assert len(results) == 1
-    assert results[0].text == "high score"
-
-
-def test_calibre_filter_always_includes_library_summary() -> None:
-    service = _service()
-    query_filter = service._build_collection_filter("calibre_books", "find me books on electronics")
-    assert query_filter is not None
-    assert isinstance(query_filter.must, list)
-    condition = query_filter.must[0]
-    match_any = getattr(condition, "match", None)
-    values = getattr(match_any, "any", [])
-    assert "library_summary" in values
-
-
-def test_slack_filter_targets_channel_and_workspace_for_channel_queries() -> None:
-    service = _service()
-    query_filter = service._build_collection_filter("slack", "what channels should I join")
-    assert query_filter is not None
-    assert isinstance(query_filter.must, list)
-    condition = query_filter.must[0]
-    assert getattr(condition, "key", "") == "doc_type"
-    match_any = getattr(condition, "match", None)
-    values = getattr(match_any, "any", [])
-    assert "channel_summary" in values
-    assert "workspace_summary" in values
-
-
-def test_slack_filter_returns_none_when_no_intent_words() -> None:
-    service = _service()
-    query_filter = service._build_collection_filter("slack", "compressor maintenance schedule")
-    assert query_filter is None
-
-
-def test_events_filter_future_uses_start_time_range() -> None:
-    service = _service()
-    query_filter = service._build_collection_filter("events", "what upcoming events are next")
-    assert query_filter is not None
-    assert isinstance(query_filter.must, list)
-    condition = query_filter.must[0]
-    assert getattr(condition, "key", "") == "start_time"
-    value_range = getattr(condition, "range", None)
-    assert getattr(value_range, "gte", None) is not None
-
-
-def test_events_filter_prefers_event_summary_for_schedule_queries() -> None:
-    service = _service()
-    query_filter = service._build_collection_filter("events", "what is the regular schedule")
-    assert query_filter is not None
-    assert isinstance(query_filter.must, list)
-    keys = [getattr(item, "key", "") for item in query_filter.must]
-    assert "record_type" in keys
-    record_condition = next(
-        item for item in query_filter.must if getattr(item, "key", "") == "record_type"
-    )
-    values = getattr(getattr(record_condition, "match", None), "any", [])
-    assert "event_summary" in values
-
-
-def test_events_filter_prefers_occurrence_for_specific_past_query() -> None:
-    service = _service()
-    query_filter = service._build_collection_filter("events", "what happened that tuesday")
-    assert query_filter is not None
-    assert isinstance(query_filter.must, list)
-    keys = [getattr(item, "key", "") for item in query_filter.must]
-    assert "record_type" in keys
-    record_condition = next(
-        item for item in query_filter.must if getattr(item, "key", "") == "record_type"
-    )
-    values = getattr(getattr(record_condition, "match", None), "any", [])
-    assert "occurrence" in values
-
-
-def test_events_filter_supports_hyphenated_collection_names() -> None:
-    service = _service()
-    query_filter = service._build_collection_filter(
-        "events-community", "what upcoming events are next"
-    )
-    assert query_filter is not None
-
-
-def test_rag_expands_search_limit_when_min_score_enabled() -> None:
-    service = _service()
-    service.top_k = 3
-    service.min_score = 0.1
-    captured: dict[str, int] = {}
-
-    class FakeClient:
-        def query_points(
-            self,
-            *,
-            collection_name: str,
-            query: object,
-            query_filter: object,
-            with_payload: bool,
-            limit: int,
-        ) -> SimpleNamespace:
-            del collection_name, query, query_filter, with_payload
-            captured["limit"] = limit
-            return SimpleNamespace(points=[])
-
-    service._search_collection(
-        client=cast(QdrantClient, FakeClient()),
-        collection="wiki",
-        vector=[0.1, 0.2],
-        query_filter=None,
-    )
-    assert captured["limit"] == 6
-
-
-def test_rag_uses_collection_specific_top_k_for_events() -> None:
-    service = _service()
-    service.top_k = 2
-    service.top_k_events = 5
-    captured: dict[str, int] = {}
-
-    class FakeClient:
-        def query_points(
-            self,
-            *,
-            collection_name: str,
-            query: object,
-            query_filter: object,
-            with_payload: bool,
-            limit: int,
-        ) -> SimpleNamespace:
-            del collection_name, query, query_filter, with_payload
-            captured["limit"] = limit
-            return SimpleNamespace(points=[])
-
-    service._search_collection(
-        client=cast(QdrantClient, FakeClient()),
-        collection="events",
-        vector=[0.1, 0.2],
-        query_filter=None,
-    )
-    assert captured["limit"] == 5
-
-
-def test_rag_reuses_single_qdrant_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    service = _service()
-    calls = {"count": 0}
-
-    async def fake_embed_query(self: RagService, _: str) -> list[float]:
-        return [0.1, 0.2, 0.3]
-
-    class FakeClient:
-        def query_points(
-            self,
-            *,
-            collection_name: str,
-            query: object,
-            query_filter: object,
-            with_payload: bool,
-            limit: int,
-        ) -> SimpleNamespace:
-            del collection_name, query, query_filter, with_payload, limit
-            return SimpleNamespace(points=[SimpleNamespace(payload={"text": "ok"}, score=0.9)])
-
-    def fake_make_client(self: RagService) -> object:
-        calls["count"] += 1
-        return FakeClient()
-
-    monkeypatch.setattr(type(service), "_embed_query", fake_embed_query)
-    monkeypatch.setattr(type(service), "_make_qdrant_client", fake_make_client)
-
-    first = asyncio.run(service.retrieve("one", enabled_collections=["wiki"]))
-    second = asyncio.run(service.retrieve("two", enabled_collections=["wiki"]))
-    assert first
-    assert second
-    assert calls["count"] == 1
-
-
-def test_rag_final_limit_sums_collection_specific_limits(monkeypatch: pytest.MonkeyPatch) -> None:
-    service = _service()
-    service.collections = ["events", "slack_general"]
-    service.top_k = 2
-    service.top_k_events = 3
-    service.top_k_slack = 3
-
-    async def fake_embed_query(self: RagService, _: str) -> list[float]:
-        return [0.1, 0.2, 0.3]
-
-    class FakeClient:
-        def query_points(
-            self,
-            *,
-            collection_name: str,
-            query: object,
-            query_filter: object,
-            with_payload: bool,
-            limit: int,
-        ) -> SimpleNamespace:
-            del query, query_filter, with_payload, limit
-            return SimpleNamespace(
-                points=[
-                    SimpleNamespace(payload={"text": f"{collection_name}-1"}, score=0.91),
-                    SimpleNamespace(payload={"text": f"{collection_name}-2"}, score=0.90),
-                ]
-            )
-
-    monkeypatch.setattr(type(service), "_embed_query", fake_embed_query)
-    monkeypatch.setattr(type(service), "_make_qdrant_client", lambda self: FakeClient())
-
-    results = asyncio.run(
-        service.retrieve("test query", enabled_collections=["events", "slack_general"])
-    )
-    assert len(results) == 4

@@ -1,0 +1,33 @@
+{
+  "about": "Golden set for the member bot. Each question can list expected_doc_ids (\"source:doc_id\", as /api/history shows them) for recall, and text checks on the answer. Grow this to at least 50 real member questions; the first entries are the plan's acceptance checks.",
+  "questions": [
+    {
+      "question": "How do I check the space is locked up when I leave?",
+      "expected_doc_ids": [],
+      "must_mention_all": ["dashboard", "sensor"],
+      "expect_answered": true
+    },
+    {
+      "question": "How do I delete a Zigbee sensor?",
+      "expected_doc_ids": [],
+      "must_mention_any": ["admin"]
+    },
+    {
+      "question": "When is the next open house?",
+      "expected_doc_ids": [],
+      "expect_next_last_saturday": true
+    },
+    {
+      "question": "How do I get trained on the laser cutter?",
+      "expected_doc_ids": [],
+      "must_mention_any": ["training"],
+      "expect_answered": true
+    },
+    {
+      "question": "How does my fob work at the back gate?",
+      "expected_doc_ids": [],
+      "must_mention_any": ["fob"],
+      "expect_answered": true
+    }
+  ]
+}

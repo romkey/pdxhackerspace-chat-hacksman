@@ -19,7 +19,11 @@ from chat_hacksman.models import (
 
 # Bump when the schema changes, and migrate older databases in _init_db
 # (stored in SQLite's PRAGMA user_version).
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# DEFAULT_SYSTEM_PROMPT before 0.9.0; a saved copy of it is dropped so the
+# member bot's prompt takes over.
+OLD_DEFAULT_SYSTEM_PROMPT = "You are Chat Hacksman, an expert assistant for hackerspace members."
 
 
 class Storage:
@@ -151,6 +155,8 @@ class Storage:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             if version < 2:
                 self._migrate_to_openai_chat(conn)
+            if version < 3:
+                self._migrate_to_answer_log(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION:d}")
 
     def _migrate_to_openai_chat(self, conn: sqlite3.Connection) -> None:
@@ -177,6 +183,26 @@ class Storage:
         conn.execute(
             "UPDATE app_settings SET payload_json = ? WHERE id = 1", (json.dumps(payload),)
         )
+
+    def _migrate_to_answer_log(self, conn: sqlite3.Connection) -> None:
+        """Version 3: each chat records the retrieved document IDs, their
+        topics, and whether it was answered from sources. The saved
+        collections (the old per-source ones) go back to the default, and so
+        does the system prompt if it was the old default."""
+        conn.execute("ALTER TABLE chat_history ADD COLUMN doc_ids_json TEXT NOT NULL DEFAULT '[]'")
+        conn.execute("ALTER TABLE chat_history ADD COLUMN topics_json TEXT NOT NULL DEFAULT '[]'")
+        conn.execute("ALTER TABLE chat_history ADD COLUMN answered INTEGER")
+        row = conn.execute("SELECT payload_json FROM app_settings WHERE id = 1").fetchone()
+        if not row:
+            return
+        payload = json.loads(row["payload_json"])
+        if isinstance(payload, dict):
+            payload.pop("enabled_rag_collections", None)
+            if payload.get("system_prompt") == OLD_DEFAULT_SYSTEM_PROMPT:
+                payload.pop("system_prompt")
+            conn.execute(
+                "UPDATE app_settings SET payload_json = ? WHERE id = 1", (json.dumps(payload),)
+            )
 
     def _ensure_chat_history_prompt_id_column(self, conn: sqlite3.Connection) -> None:
         columns = conn.execute("PRAGMA table_info(chat_history)").fetchall()
@@ -211,6 +237,8 @@ class Storage:
             payload = json.loads(row["payload_json"])
             if "enabled_rag_collections" not in payload:
                 payload["enabled_rag_collections"] = self.default_settings.enabled_rag_collections
+            if "system_prompt" not in payload:
+                payload["system_prompt"] = self.default_settings.system_prompt
             return AppSettings.model_validate(payload)
 
     def save_settings(self, settings: AppSettings) -> AppSettings:
@@ -297,6 +325,9 @@ class Storage:
         rag_collections: list[str],
         rag_hits: int,
         config_snapshot: dict[str, Any],
+        doc_ids: list[str] | None = None,
+        topics: list[str] | None = None,
+        answered: bool | None = None,
     ) -> int:
         created_at = datetime.now(UTC).isoformat()
         with self._connect() as conn:
@@ -313,9 +344,12 @@ class Storage:
                     rag_collections_json,
                     rag_hits,
                     config_snapshot_json,
-                    prompt_id
+                    prompt_id,
+                    doc_ids_json,
+                    topics_json,
+                    answered
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     created_at,
@@ -328,6 +362,9 @@ class Storage:
                     rag_hits,
                     json.dumps(config_snapshot),
                     prompt_id if prompt_id > 0 else None,
+                    json.dumps(doc_ids or []),
+                    json.dumps(topics or []),
+                    None if answered is None else int(answered),
                 ),
             )
             conn.commit()
@@ -350,7 +387,10 @@ class Storage:
                     answer,
                     rag_collections_json,
                     rag_hits,
-                    config_snapshot_json
+                    config_snapshot_json,
+                    doc_ids_json,
+                    topics_json,
+                    answered
                 FROM chat_history
                 ORDER BY id DESC
                 LIMIT ?
@@ -373,9 +413,64 @@ class Storage:
                     rag_collections=json.loads(row["rag_collections_json"]),
                     rag_hits=row["rag_hits"],
                     config_snapshot=json.loads(row["config_snapshot_json"]),
+                    doc_ids=json.loads(row["doc_ids_json"]),
+                    topics=json.loads(row["topics_json"]),
+                    answered=None if row["answered"] is None else bool(row["answered"]),
                 )
             )
         return records
+
+    def get_unanswered(self, *, since: datetime) -> list[tuple[int, datetime, str, list[str]]]:
+        """(history id, time, question, topics) of chats since `since` that
+        weren't answered from sources, oldest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, created_at, question, topics_json
+                FROM chat_history
+                WHERE answered = 0 AND created_at >= ?
+                ORDER BY id
+                """,
+                (since.isoformat(),),
+            ).fetchall()
+        return [
+            (
+                int(row["id"]),
+                datetime.fromisoformat(row["created_at"]),
+                row["question"],
+                json.loads(row["topics_json"]),
+            )
+            for row in rows
+        ]
+
+    def get_negative_feedback(
+        self, *, since: datetime
+    ) -> list[tuple[int, datetime, str, str, str, list[str]]]:
+        """(feedback id, time, note, question, answer, doc ids) of thumbs-down
+        feedback since `since`, newest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT f.id, f.created_at, f.text, f.question, f.answer,
+                       COALESCE(h.doc_ids_json, '[]') AS doc_ids_json
+                FROM chat_feedback f
+                LEFT JOIN chat_history h ON h.id = f.history_id
+                WHERE f.rating = 'down' AND f.created_at >= ?
+                ORDER BY f.id DESC
+                """,
+                (since.isoformat(),),
+            ).fetchall()
+        return [
+            (
+                int(row["id"]),
+                datetime.fromisoformat(row["created_at"]),
+                row["text"],
+                row["question"],
+                row["answer"],
+                json.loads(row["doc_ids_json"]),
+            )
+            for row in rows
+        ]
 
     def clear_history(self) -> int:
         with self._connect() as conn:

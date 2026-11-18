@@ -1,3 +1,15 @@
+"""Retrieval over the shared hs_* Qdrant collections.
+
+Each point follows the payload in the shared architecture plan: `text`,
+`title`, `heading_path`, `url`, `source`, `tier`, `authority`,
+`stale_after`, `superseded_by`, `page`, `updated_at` and the entity lists.
+A question is embedded (dense) and, when a sparse vector is configured,
+also matched by keyword (sparse, BM25 inferred by Qdrant itself); the two
+result lists are fused with reciprocal rank fusion. The candidates from
+every collection are then reranked together, and an authority pass prefers
+policy, signs and the wiki over manuals and Slack when relevance is close.
+"""
+
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -7,98 +19,106 @@ from typing import Any
 
 import httpx
 from qdrant_client import QdrantClient
-from qdrant_client.http.exceptions import UnexpectedResponse
-from qdrant_client.http.models import Condition, DatetimeRange, FieldCondition, Filter, MatchAny
+from qdrant_client.http.models import (
+    DatetimeRange,
+    Document,
+    FieldCondition,
+    Filter,
+    Fusion,
+    FusionQuery,
+    IsEmptyCondition,
+    MatchAny,
+    PayloadField,
+    Prefetch,
+)
 
 from chat_hacksman.models import ContextChunk
 from chat_hacksman.rerank import Reranker
 
 logger = logging.getLogger(__name__)
 
-
-def _is_slack_collection(collection: str) -> bool:
-    normalized = collection.strip().lower()
-    return (
-        normalized == "slack" or normalized.startswith("slack_") or normalized.startswith("slack-")
-    )
-
-
-def _is_events_collection(collection: str) -> bool:
-    normalized = collection.strip().lower()
-    return (
-        normalized == "events"
-        or normalized.startswith("events_")
-        or normalized.startswith("events-")
-    )
-
-
-def _is_slack_payload(payload: dict[str, Any]) -> bool:
-    slack_keys = {
-        "channel_name",
-        "channel_id",
-        "user_name",
-        "user_id",
-        "permalink",
-        "thread_ts",
-        "ts",
-    }
-    return any(key in payload for key in slack_keys)
-
-
-def _is_calibre_collection(collection: str) -> bool:
-    normalized = collection.strip().lower()
-    return (
-        normalized == "calibre_books"
-        or normalized.startswith("calibre_")
-        or normalized.startswith("calibre-")
-    )
-
-
-def _extract_slack_chunk_text(payload: dict[str, Any]) -> str:
-    doc_type = payload.get("doc_type")
-    normalized_doc_type = doc_type.strip().lower() if isinstance(doc_type, str) else ""
-    preferred_keys: tuple[str, ...]
-    if normalized_doc_type == "thread_summary":
-        preferred_keys = ("thread_summary", "summary", "thread_text", "text")
-    elif normalized_doc_type == "channel_summary":
-        preferred_keys = ("channel_summary", "summary", "channel_text", "text")
-    elif normalized_doc_type in {"user_summary", "team_summary", "workspace_summary"}:
-        preferred_keys = ("summary", "profile", "description", "text")
-    elif normalized_doc_type == "message":
-        preferred_keys = ("text", "message_text", "body", "content")
-    else:
-        preferred_keys = ("summary", "text", "content", "body")
-
-    for key in preferred_keys:
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    message_obj = payload.get("message")
-    if isinstance(message_obj, dict):
-        message_text = message_obj.get("text")
-        if isinstance(message_text, str) and message_text.strip():
-            return message_text.strip()
-
-    return ""
-
-
-def _extract_chunk_text(payload: dict[str, Any]) -> str:
-    if _is_slack_payload(payload):
-        slack_text = _extract_slack_chunk_text(payload)
-        if slack_text:
-            return slack_text
-    for key in ("chunk_text", "text", "content", "chunk", "document", "body"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
+# Authority of space-written rules (policy documents and signs).
+POLICY_AUTHORITY = 5
+# A policy or sign chunk this relevant (relevance scaled 0-1 over the
+# candidates) is always given to the model, even if it missed the top N.
+POLICY_MIN_RELEVANCE = 0.5
 
 
 def _bearer_auth_headers(api_key: str | None) -> dict[str, str] | None:
     if not api_key:
         return None
     return {"Authorization": f"Bearer {api_key}"}
+
+
+def authority_of(chunk: ContextChunk) -> int:
+    """The chunk's payload authority, 1-5; 1 if missing or unusable."""
+    value = chunk.metadata.get("authority")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return min(max(value, 1), POLICY_AUTHORITY)
+    return 1
+
+
+def relevance_of(chunk: ContextChunk) -> float:
+    """The reranker's score when reranking ran, else the search score."""
+    return chunk.rerank_score if chunk.rerank_score is not None else chunk.score
+
+
+def select_chunks(
+    chunks: list[ContextChunk], top_n: int, authority_weight: float
+) -> list[ContextChunk]:
+    """The top_n chunks to give the model.
+
+    Relevance is scaled to 0-1 over the candidates, then each chunk gets
+    up to `authority_weight` more for its authority, so a policy chunk wins
+    over a slightly more relevant Slack fact but not over a much more
+    relevant one. The most relevant policy or sign chunk is always kept if
+    its scaled relevance is at least POLICY_MIN_RELEVANCE.
+    """
+    if not chunks:
+        return []
+    scores = [relevance_of(chunk) for chunk in chunks]
+    low, high = min(scores), max(scores)
+    spread = high - low
+
+    def scaled(score: float) -> float:
+        return (score - low) / spread if spread > 0 else 1.0
+
+    ranked = sorted(
+        range(len(chunks)),
+        key=lambda i: (
+            scaled(scores[i]) + authority_weight * authority_of(chunks[i]) / POLICY_AUTHORITY
+        ),
+        reverse=True,
+    )
+    chosen = ranked[:top_n]
+    policies = [
+        i
+        for i in sorted(range(len(chunks)), key=lambda i: scores[i], reverse=True)
+        if authority_of(chunks[i]) >= POLICY_AUTHORITY and scaled(scores[i]) >= POLICY_MIN_RELEVANCE
+    ]
+    if policies and policies[0] not in chosen:
+        chosen = [*chosen[: top_n - 1], policies[0]]
+    return [chunks[i] for i in chosen]
+
+
+def _chunk_from_payload(collection: str, score: float, payload: dict[str, Any]) -> ContextChunk:
+    text = payload.get("text")
+    return ContextChunk(
+        collection=collection,
+        score=score,
+        text=text.strip() if isinstance(text, str) else "",
+        metadata=payload,
+    )
+
+
+def _rerank_text(chunk: ContextChunk) -> str:
+    """What the reranker reads: where the chunk sits, then the chunk."""
+    parts = [
+        value.strip()
+        for value in (chunk.metadata.get("title"), chunk.metadata.get("heading_path"))
+        if isinstance(value, str) and value.strip()
+    ]
+    return f"{' > '.join(parts)}\n{chunk.text}" if parts else chunk.text
 
 
 @dataclass(slots=True)
@@ -108,28 +128,38 @@ class RagService:
     collections: list[str]
     embedding_url: str
     embedding_model: str
-    top_k: int
-    top_k_events: int | None = None
-    top_k_slack: int | None = None
-    top_k_calibre: int | None = None
+    candidates: int = 50
+    top_n: int = 8
     embedding_context_length: int = 8192
     embedding_timeout_seconds: float = 30.0
+    # Applied only to dense-only search.
     min_score: float = 0.0
     embedding_api_key: str | None = None
     embedding_query_prefix: str = ""
-    # With a reranker, each collection is searched for rerank_candidates
-    # chunks (at least its top_k), all of them are reranked together, and
-    # the best rerank_top_n (default: the sum of the collections' top_k) at
-    # or above rerank_min_score are kept.
+    dense_vector: str = "dense"
+    # Empty: dense-only search.
+    sparse_vector: str = "sparse"
+    sparse_model: str = "qdrant/bm25"
+    allowed_tiers: tuple[str, ...] = ("public", "member")
+    authority_weight: float = 0.1
     reranker: Reranker | None = None
-    rerank_candidates: int = 10
-    rerank_top_n: int | None = None
     rerank_min_score: float | None = None
     _collection_vector_dims: dict[str, int | None] = field(default_factory=dict)
     _client: QdrantClient | None = None
 
+    @property
+    def hybrid(self) -> bool:
+        return bool(self.sparse_vector)
+
     def _make_qdrant_client(self) -> QdrantClient:
-        return QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key, timeout=5)
+        # cloud_inference sends the sparse query's text to Qdrant to embed
+        # (BM25 runs in the server) instead of embedding it here.
+        return QdrantClient(
+            url=self.qdrant_url,
+            api_key=self.qdrant_api_key,
+            timeout=5,
+            cloud_inference=self.hybrid,
+        )
 
     def _get_qdrant_client(self) -> QdrantClient:
         if self._client is None:
@@ -173,7 +203,6 @@ class RagService:
 
         tokens = normalized.split()
         if len(tokens) > limit:
-            truncated = " ".join(tokens[:limit])
             logger.warning(
                 "Embedding input exceeded configured context length model=%s "
                 "estimated_tokens=%d limit=%d; truncating",
@@ -181,7 +210,7 @@ class RagService:
                 len(tokens),
                 limit,
             )
-            return truncated
+            return " ".join(tokens[:limit])
 
         if len(normalized) > max_chars:
             logger.warning(
@@ -218,194 +247,85 @@ class RagService:
             logger.warning("Embedding response had no usable vector payload")
         return embedding
 
-    def _search_collection(
+    def base_filter(self, now: datetime | None = None) -> Filter:
+        """Allowed tiers only, nothing superseded, nothing past stale_after."""
+        moment = now or datetime.now(tz=UTC)
+        return Filter(
+            must=[
+                FieldCondition(key="tier", match=MatchAny(any=list(self.allowed_tiers))),
+                IsEmptyCondition(is_empty=PayloadField(key="superseded_by")),
+                Filter(
+                    should=[
+                        IsEmptyCondition(is_empty=PayloadField(key="stale_after")),
+                        FieldCondition(key="stale_after", range=DatetimeRange(gt=moment)),
+                    ]
+                ),
+            ]
+        )
+
+    def _dense_search(
+        self, client: QdrantClient, collection: str, vector: list[float], query_filter: Filter
+    ) -> list[Any]:
+        response = client.query_points(
+            collection_name=collection,
+            query=vector,
+            using=self.dense_vector or None,
+            query_filter=query_filter,
+            with_payload=True,
+            limit=self.candidates,
+        )
+        return [hit for hit in response.points if float(hit.score) >= self.min_score]
+
+    def _hybrid_search(
         self,
-        *,
         client: QdrantClient,
         collection: str,
         vector: list[float],
-        query_filter: Filter | None = None,
+        query: str,
+        query_filter: Filter,
     ) -> list[Any]:
-        target_top_k = self._candidate_limit(collection)
-        # Fetch extra when RAG_MIN_SCORE will drop some; retrieve() caps
-        # what's left at the candidate limit.
-        search_limit = target_top_k * 2 if self.min_score > 0 else target_top_k
-        if hasattr(client, "search"):
-            try:
-                hits = client.search(
-                    collection_name=collection,
-                    query_vector=vector,
-                    query_filter=query_filter,
-                    with_payload=True,
-                    limit=search_limit,
-                )
-            except TypeError:
-                try:
-                    hits = client.search(
-                        collection_name=collection,
-                        query_vector=vector,
-                        filter=query_filter,
-                        with_payload=True,
-                        limit=search_limit,
-                    )
-                except TypeError:
-                    hits = client.search(
-                        collection_name=collection,
-                        query_vector=vector,
-                        with_payload=True,
-                        limit=search_limit,
-                    )
-            return list(hits)
-
-        if hasattr(client, "query_points"):
-            try:
-                response = client.query_points(
-                    collection_name=collection,
+        response = client.query_points(
+            collection_name=collection,
+            prefetch=[
+                Prefetch(
                     query=vector,
-                    query_filter=query_filter,
-                    with_payload=True,
-                    limit=search_limit,
-                )
-            except TypeError:
-                try:
-                    response = client.query_points(
-                        collection_name=collection,
-                        query=vector,
-                        filter=query_filter,
-                        with_payload=True,
-                        limit=search_limit,
-                    )
-                except TypeError:
-                    response = client.query_points(
-                        collection_name=collection,
-                        query=vector,
-                        with_payload=True,
-                        limit=search_limit,
-                    )
-            points = getattr(response, "points", response)
-            return list(points) if points is not None else []
-
-        raise AttributeError(
-            "Qdrant client has neither 'search' nor 'query_points'; unsupported version."
+                    using=self.dense_vector or None,
+                    filter=query_filter,
+                    limit=self.candidates,
+                ),
+                Prefetch(
+                    query=Document(text=query, model=self.sparse_model),
+                    using=self.sparse_vector,
+                    filter=query_filter,
+                    limit=self.candidates,
+                ),
+            ],
+            query=FusionQuery(fusion=Fusion.RRF),
+            with_payload=True,
+            limit=self.candidates,
         )
+        return list(response.points)
 
-    def _calibre_chunk_types_for_query(self, query: str) -> list[str]:
-        normalized = query.strip().lower()
-        catalog_words = {"books", "book", "library", "catalog", "available", "have", "collection"}
-        passage_words = {"quote", "passage", "chapter", "excerpt", "text", "say", "where"}
-        tokens = set(normalized.split())
-
-        if tokens & catalog_words:
-            return ["book_metadata", "library_summary"]
-        if tokens & passage_words:
-            return ["content", "description", "library_summary"]
-        return ["content", "description", "book_metadata", "library_summary"]
-
-    def _slack_doc_types_for_query(self, query: str) -> list[str] | None:
-        tokens = set(query.strip().lower().split())
-        channel_words = {"channel", "channels", "join", "where", "post", "discuss", "room"}
-        people_words = {"who", "person", "member", "members", "team", "contact", "expert"}
-        thread_words = {"decided", "decision", "discussed", "outcome", "resolved", "thread"}
-
-        if tokens & channel_words:
-            return ["channel_summary", "workspace_summary"]
-        if tokens & people_words:
-            return ["user_summary", "team_summary", "message"]
-        if tokens & thread_words:
-            return ["thread_summary", "message"]
-        return None
-
-    def _events_filter_for_query(self, query: str) -> Filter | None:
-        tokens = set(query.strip().lower().split())
-        past_words = {"past", "previous", "last", "history", "happened", "was", "ran"}
-        future_words = {"upcoming", "next", "future", "soon", "scheduled", "when", "will"}
-        now_words = {"now", "today", "current", "happening", "ongoing"}
-        summary_words = {"often", "frequency", "recurring", "regular", "schedule", "series"}
-        occurrence_words = {"happened", "specific", "that", "tuesday", "week"}
-        now = datetime.now(tz=UTC)
-
-        must: list[Condition] = []
-        if tokens & future_words:
-            must.append(
-                FieldCondition(
-                    key="start_time",
-                    range=DatetimeRange(gte=now),
+    def _search_collection(
+        self,
+        client: QdrantClient,
+        collection: str,
+        vector: list[float],
+        query: str,
+        query_filter: Filter,
+    ) -> list[Any]:
+        if self.hybrid:
+            try:
+                return self._hybrid_search(client, collection, vector, query, query_filter)
+            except Exception as exc:
+                logger.warning(
+                    "Hybrid search failed collection=%s error_type=%s error=%s; "
+                    "falling back to dense search",
+                    collection,
+                    type(exc).__name__,
+                    exc,
                 )
-            )
-        elif tokens & now_words:
-            must.append(
-                FieldCondition(
-                    key="temporal_status",
-                    match=MatchAny(any=["current", "future"]),
-                )
-            )
-        elif tokens & past_words:
-            must.append(
-                FieldCondition(
-                    key="start_time",
-                    range=DatetimeRange(lt=now),
-                )
-            )
-
-        if tokens & summary_words:
-            must.append(
-                FieldCondition(
-                    key="record_type",
-                    match=MatchAny(any=["event_summary"]),
-                )
-            )
-        elif tokens & occurrence_words:
-            must.append(
-                FieldCondition(
-                    key="record_type",
-                    match=MatchAny(any=["occurrence"]),
-                )
-            )
-
-        if not must:
-            return None
-        return Filter(must=must)
-
-    def _candidate_limit(self, collection: str) -> int:
-        """Chunks to take from a collection: its top_k, or more for the
-        reranker to choose from."""
-        top_k = self._top_k_for_collection(collection)
-        return max(top_k, self.rerank_candidates) if self.reranker is not None else top_k
-
-    def _top_k_for_collection(self, collection: str) -> int:
-        if _is_calibre_collection(collection) and self.top_k_calibre is not None:
-            return max(1, self.top_k_calibre)
-        if _is_slack_collection(collection) and self.top_k_slack is not None:
-            return max(1, self.top_k_slack)
-        if _is_events_collection(collection) and self.top_k_events is not None:
-            return max(1, self.top_k_events)
-        return max(1, self.top_k)
-
-    def _build_collection_filter(self, collection: str, query: str) -> Filter | None:
-        if _is_calibre_collection(collection):
-            chunk_types = self._calibre_chunk_types_for_query(query)
-            return Filter(
-                must=[
-                    FieldCondition(
-                        key="chunk_type",
-                        match=MatchAny(any=chunk_types),
-                    )
-                ]
-            )
-        if _is_slack_collection(collection):
-            doc_types = self._slack_doc_types_for_query(query)
-            if doc_types:
-                return Filter(
-                    must=[
-                        FieldCondition(
-                            key="doc_type",
-                            match=MatchAny(any=doc_types),
-                        )
-                    ]
-                )
-        if _is_events_collection(collection):
-            return self._events_filter_for_query(query)
-        return None
+        return self._dense_search(client, collection, vector, query_filter)
 
     def _extract_vector_dim(self, collection_info: Any) -> int | None:
         config = getattr(collection_info, "config", None)
@@ -413,116 +333,63 @@ class RagService:
         vectors = getattr(params, "vectors", None)
         if vectors is None:
             return None
-
-        size = getattr(vectors, "size", None)
-        if isinstance(size, int):
-            return size
-
-        # Named vectors may be represented as mapping-like objects.
-        maybe_mapping = vectors
-        root_mapping = getattr(vectors, "__root__", None)
-        if root_mapping is not None:
-            maybe_mapping = root_mapping
-
-        values = maybe_mapping.values() if hasattr(maybe_mapping, "values") else None
-        if values is None:
-            return None
-
-        sizes = {int(item.size) for item in values if isinstance(getattr(item, "size", None), int)}
-        if len(sizes) == 1:
-            return sizes.pop()
-        return None
+        if isinstance(vectors, dict):
+            named = vectors.get(self.dense_vector) if self.dense_vector else None
+            size = getattr(named, "size", None)
+        else:
+            size = None if self.dense_vector else getattr(vectors, "size", None)
+        return size if isinstance(size, int) else None
 
     def _get_collection_vector_dim(self, client: QdrantClient, collection: str) -> int | None:
         if collection in self._collection_vector_dims:
             return self._collection_vector_dims[collection]
-
         try:
-            info = client.get_collection(collection_name=collection)
-            vector_dim = self._extract_vector_dim(info)
-            self._collection_vector_dims[collection] = vector_dim
-            if vector_dim is None:
-                logger.warning(
-                    "Could not determine vector dimension for collection=%s; will try query anyway",
-                    collection,
-                )
-            return vector_dim
+            vector_dim = self._extract_vector_dim(client.get_collection(collection_name=collection))
         except Exception as exc:
+            logger.warning("Failed to read vector dimension for collection=%s: %s", collection, exc)
+            vector_dim = None
+        if vector_dim is None:
             logger.warning(
-                "Failed to read vector dimension for collection=%s: %s",
+                "Could not find dense vector %r in collection=%s; will try the query anyway",
+                self.dense_vector or "(unnamed)",
                 collection,
-                exc,
             )
-            self._collection_vector_dims[collection] = None
-            return None
+        self._collection_vector_dims[collection] = vector_dim
+        return vector_dim
 
     async def retrieve(
         self, query: str, enabled_collections: list[str] | None = None
     ) -> list[ContextChunk]:
-        target_collections = (
-            enabled_collections if enabled_collections is not None else self.collections
-        )
-        available_set = set(self.collections)
-        target_collections = [
-            collection for collection in target_collections if collection in available_set
-        ]
+        """The chunks to answer `query` from: best first, at most top_n."""
+        target = enabled_collections if enabled_collections is not None else self.collections
+        available = set(self.collections)
+        target_collections = [collection for collection in target if collection in available]
         if not target_collections:
-            logger.info("Skipping RAG retrieval because no collections are enabled")
+            logger.info("Skipping retrieval because no collections are enabled")
             return []
-        logger.info(
-            "Running RAG retrieval across collections=%s",
-            ",".join(target_collections),
-        )
+        logger.info("Running retrieval across collections=%s", ",".join(target_collections))
         vector = await self._embed_query(query)
         if vector is None:
-            logger.warning("Skipping RAG retrieval because query embedding failed")
+            logger.warning("Skipping retrieval because query embedding failed")
             return []
-        query_dim = len(vector)
 
         client = self._get_qdrant_client()
-        out: list[ContextChunk] = []
+        query_filter = self.base_filter()
+        candidates: list[ContextChunk] = []
         for collection in target_collections:
             expected_dim = self._get_collection_vector_dim(client, collection)
-            if expected_dim is not None and expected_dim != query_dim:
+            if expected_dim is not None and expected_dim != len(vector):
                 logger.warning(
                     "Skipping collection=%s due to vector dimension mismatch "
                     "(expected=%d, got=%d). "
                     "Use a matching embedding model or rebuild that collection.",
                     collection,
                     expected_dim,
-                    query_dim,
+                    len(vector),
                 )
                 continue
             try:
-                query_filter = self._build_collection_filter(collection, query)
-                hits = self._search_collection(
-                    client=client,
-                    collection=collection,
-                    vector=vector,
-                    query_filter=query_filter,
-                )
-                logger.info(
-                    "Qdrant search succeeded for %s with %d hits",
-                    collection,
-                    len(hits),
-                )
-            except UnexpectedResponse as exc:
-                message = str(exc)
-                if "Vector dimension error" in message:
-                    logger.warning(
-                        "Skipping collection=%s due to vector dimension error "
-                        "reported by Qdrant: %s",
-                        collection,
-                        message,
-                    )
-                    continue
-                logger.warning(
-                    "Qdrant search failed collection=%s error_type=%s error=%s",
-                    collection,
-                    type(exc).__name__,
-                    exc,
-                )
-                continue
+                hits = self._search_collection(client, collection, vector, query, query_filter)
             except Exception as exc:
                 logger.warning(
                     "Qdrant search failed collection=%s error_type=%s error=%s",
@@ -531,51 +398,30 @@ class RagService:
                     exc,
                 )
                 continue
-
-            # Without reranking, extra hits are trimmed by the overall limit
-            # below; with it, every hit kept here is sent to the reranker.
-            kept = 0
+            logger.info("Qdrant search for %s found %d hits", collection, len(hits))
             for hit in hits:
-                if self.reranker is not None and kept >= self._candidate_limit(collection):
-                    break
                 payload = hit.payload if isinstance(hit.payload, dict) else {}
-                text = _extract_chunk_text(payload)
-                if not text:
-                    continue
-                score = float(hit.score)
-                if score < self.min_score:
-                    continue
-                kept += 1
-                out.append(
-                    ContextChunk(
-                        collection=collection,
-                        score=score,
-                        text=text,
-                        metadata=payload,
-                    )
-                )
+                chunk = _chunk_from_payload(collection, float(hit.score), payload)
+                if chunk.text:
+                    candidates.append(chunk)
 
-        final_limit = sum(
-            self._top_k_for_collection(collection) for collection in target_collections
-        )
-        if final_limit <= 0:
-            final_limit = max(1, self.top_k)
-        out.sort(key=lambda item: item.score, reverse=True)
-        if self.reranker is not None and out:
-            reranked = await self._rerank(self.reranker, query, out, final_limit)
+        candidates.sort(key=lambda chunk: chunk.score, reverse=True)
+        if self.reranker is not None and candidates:
+            reranked = await self._rerank(self.reranker, query, candidates)
             if reranked is not None:
-                logger.info("RAG retrieval produced %d reranked chunks", len(reranked))
-                return reranked
-            logger.warning("Reranking failed; using vector search order")
-        logger.info("RAG retrieval produced %d usable chunks", len(out[:final_limit]))
-        return out[:final_limit]
+                candidates = reranked
+            else:
+                logger.warning("Reranking failed; using search order")
+        chosen = select_chunks(candidates, self.top_n, self.authority_weight)
+        logger.info("Retrieval chose %d of %d candidate chunks", len(chosen), len(candidates))
+        return chosen
 
     async def _rerank(
-        self, reranker: Reranker, query: str, chunks: list[ContextChunk], final_limit: int
+        self, reranker: Reranker, query: str, chunks: list[ContextChunk]
     ) -> list[ContextChunk] | None:
-        """The chunks most relevant to the query by rerank score, or None if
-        the reranker failed."""
-        scores = await reranker.rerank(query, [chunk.text for chunk in chunks])
+        """The chunks with rerank scores, best first, without those under
+        rerank_min_score; None if the reranker failed."""
+        scores = await reranker.rerank(query, [_rerank_text(chunk) for chunk in chunks])
         if scores is None:
             return None
         scored = [
@@ -583,6 +429,6 @@ class RagService:
             for chunk, score in zip(chunks, scores, strict=True)
             if self.rerank_min_score is None or score >= self.rerank_min_score
         ]
-        # Stable sort: equal rerank scores keep their vector-score order.
+        # Stable sort: equal rerank scores keep their search order.
         scored.sort(key=lambda chunk: chunk.rerank_score or 0.0, reverse=True)
-        return scored[: self.rerank_top_n or final_limit]
+        return scored

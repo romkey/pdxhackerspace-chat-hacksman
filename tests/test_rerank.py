@@ -1,14 +1,11 @@
 import asyncio
 import json
 from collections.abc import Callable
-from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from chat_hacksman.config import Settings
-from chat_hacksman.models import ContextChunk
-from chat_hacksman.rag import RagService
 from chat_hacksman.rerank import Reranker, truncate_words
 from chat_hacksman.server import build_reranker
 from tests.conftest import Handler
@@ -117,132 +114,6 @@ def test_truncate_words() -> None:
     assert truncate_words("a b c d", 2) == "a b"
     assert truncate_words("short text", 10) == "short text"
     assert truncate_words("x" * 1000, 2) == "x" * 128
-
-
-def _service(reranker: Reranker | None, **kwargs: object) -> RagService:
-    service = RagService(
-        qdrant_url="http://localhost:6333",
-        qdrant_api_key=None,
-        collections=["wiki", "events"],
-        embedding_url="http://localhost:8080/v1",
-        embedding_model="m",
-        top_k=2,
-        top_k_events=1,
-        reranker=reranker,
-    )
-    for key, value in kwargs.items():
-        setattr(service, key, value)
-    return service
-
-
-class FakeQdrant:
-    """Returns four hits per collection, best vector score first."""
-
-    def __init__(self) -> None:
-        self.limits: dict[str, int] = {}
-
-    def query_points(
-        self,
-        *,
-        collection_name: str,
-        query: object,
-        query_filter: object,
-        with_payload: bool,
-        limit: int,
-    ) -> SimpleNamespace:
-        self.limits[collection_name] = limit
-        return SimpleNamespace(
-            points=[
-                SimpleNamespace(payload={"text": f"{collection_name}-{n}"}, score=0.9 - n / 10)
-                for n in range(4)
-            ]
-        )
-
-
-def _retrieve(
-    monkeypatch: pytest.MonkeyPatch, service: RagService, scores: dict[str, float] | None
-) -> tuple[list[ContextChunk], FakeQdrant, list[list[str]]]:
-    """Runs retrieve() with fake embedding, Qdrant and reranker. `scores`
-    maps chunk text to rerank score; None makes the reranker fail."""
-    qdrant = FakeQdrant()
-    reranked: list[list[str]] = []
-
-    async def fake_embed(self: RagService, query: str) -> list[float]:
-        return [0.1, 0.2]
-
-    async def fake_rerank(self: Reranker, query: str, documents: list[str]) -> list[float] | None:
-        reranked.append(documents)
-        return None if scores is None else [scores[document] for document in documents]
-
-    monkeypatch.setattr(RagService, "_embed_query", fake_embed)
-    monkeypatch.setattr(RagService, "_make_qdrant_client", lambda self: qdrant)
-    monkeypatch.setattr(Reranker, "rerank", fake_rerank)
-    chunks = asyncio.run(service.retrieve("laser safety"))
-    return chunks, qdrant, reranked
-
-
-ALL_SCORES = {f"{c}-{n}": 0.0 for c in ("wiki", "events") for n in range(4)} | {
-    "wiki-3": 0.95,
-    "events-2": 0.9,
-    "wiki-0": 0.2,
-}
-
-
-def test_reranking_reorders_across_collections(monkeypatch: pytest.MonkeyPatch) -> None:
-    service = _service(Reranker(url="http://r.local", model="m"), rerank_candidates=4)
-    chunks, qdrant, reranked = _retrieve(monkeypatch, service, ALL_SCORES)
-
-    # Each collection is searched for rerank_candidates, not its top_k.
-    assert qdrant.limits == {"wiki": 4, "events": 4}
-    assert len(reranked[0]) == 8
-    # Kept: the sum of top_k (2 + 1), by rerank score.
-    assert [chunk.text for chunk in chunks] == ["wiki-3", "events-2", "wiki-0"]
-    assert [chunk.rerank_score for chunk in chunks] == [0.95, 0.9, 0.2]
-    assert chunks[0].score == pytest.approx(0.6)
-
-
-def test_rerank_top_n_and_min_score(monkeypatch: pytest.MonkeyPatch) -> None:
-    service = _service(
-        Reranker(url="http://r.local", model="m"),
-        rerank_candidates=4,
-        rerank_top_n=5,
-        rerank_min_score=0.5,
-    )
-    chunks, _, _ = _retrieve(monkeypatch, service, ALL_SCORES)
-    assert [chunk.text for chunk in chunks] == ["wiki-3", "events-2"]
-
-
-def test_candidates_never_fewer_than_top_k(monkeypatch: pytest.MonkeyPatch) -> None:
-    service = _service(Reranker(url="http://r.local", model="m"), rerank_candidates=1)
-    _, qdrant, _ = _retrieve(monkeypatch, service, ALL_SCORES)
-    assert qdrant.limits == {"wiki": 2, "events": 1}
-
-
-def test_min_score_doubling_does_not_grow_the_rerank_pool(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    service = _service(
-        Reranker(url="http://r.local", model="m"), rerank_candidates=3, min_score=0.1
-    )
-    _, qdrant, reranked = _retrieve(monkeypatch, service, ALL_SCORES)
-    # Qdrant is asked for twice as many, but only 3 per collection are reranked.
-    assert qdrant.limits == {"wiki": 6, "events": 6}
-    assert sorted(reranked[0]) == ["events-0", "events-1", "events-2", "wiki-0", "wiki-1", "wiki-2"]
-
-
-def test_failed_reranking_falls_back_to_vector_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    service = _service(Reranker(url="http://r.local", model="m"), rerank_candidates=4)
-    chunks, _, reranked = _retrieve(monkeypatch, service, None)
-    assert reranked
-    assert [chunk.text for chunk in chunks] == ["wiki-0", "events-0", "wiki-1"]
-    assert all(chunk.rerank_score is None for chunk in chunks)
-
-
-def test_no_reranker_keeps_vector_search(monkeypatch: pytest.MonkeyPatch) -> None:
-    chunks, qdrant, reranked = _retrieve(monkeypatch, _service(None), ALL_SCORES)
-    assert reranked == []
-    assert qdrant.limits == {"wiki": 2, "events": 1}
-    assert [chunk.text for chunk in chunks] == ["wiki-0", "events-0", "wiki-1"]
 
 
 def test_build_reranker_from_settings() -> None:

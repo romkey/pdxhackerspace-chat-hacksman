@@ -95,15 +95,31 @@ class ContextChunk(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ChatTurn(BaseModel):
+    """One earlier message of this conversation, kept by the browser only."""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=16000)
+
+
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=8000)
-    use_rag: bool = True
+    # Earlier turns, oldest first; only the last CHAT_HISTORY_TURNS are used.
+    history: list[ChatTurn] = Field(default_factory=list, max_length=40)
     temporary_chat: bool = False
+    # Stream the answer as newline-delimited JSON events.
+    stream: bool = False
 
 
 class ChatResponse(BaseModel):
     answer: str
+    # The standalone query searched for (the question, rewritten with the history).
+    search_query: str = ""
     context: list[ContextChunk] = Field(default_factory=list)
+    # Numbers (1-based, into context) of the sources the answer cites.
+    citations: list[int] = Field(default_factory=list)
+    # Whether the answer came from the sources: there were some and it cites them.
+    answered: bool = False
     metrics: dict[str, Any] = Field(default_factory=dict)
     history_id: int | None = None
 
@@ -120,6 +136,10 @@ class HistoryRecord(BaseModel):
     rag_collections: list[str]
     rag_hits: int
     config_snapshot: dict[str, Any]
+    doc_ids: list[str] = Field(default_factory=list)
+    topics: list[str] = Field(default_factory=list)
+    # None for chats saved before this was recorded.
+    answered: bool | None = None
 
 
 class FeedbackCreateRequest(BaseModel):
@@ -142,3 +162,35 @@ class FeedbackRecord(BaseModel):
     answer: str
     provider: str
     model: str
+
+
+class UnansweredQuestion(BaseModel):
+    history_id: int
+    created_at: datetime
+    question: str
+
+
+class UnansweredGroup(BaseModel):
+    # A topic slug from the sources found, or "unclassified".
+    topic: str
+    questions: list[UnansweredQuestion]
+
+
+class UnansweredReport(BaseModel):
+    since: datetime
+    total: int
+    groups: list[UnansweredGroup]
+
+
+class NegativeFeedbackItem(BaseModel):
+    feedback_id: int
+    created_at: datetime
+    note: str
+    question: str
+    answer: str
+    doc_ids: list[str]
+
+
+class NegativeFeedbackReport(BaseModel):
+    since: datetime
+    items: list[NegativeFeedbackItem]

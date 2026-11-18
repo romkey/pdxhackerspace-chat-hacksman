@@ -20,7 +20,46 @@ REMOVED_VARIABLES: dict[str, str] = {
     "DEFAULT_LLM_BASE_URL": "LLM_URL, which includes /v1",
     "DEFAULT_MODEL": "LLM_MODEL",
     "OLLAMA_API_KEY": "LLM_API_KEY",
+    # 0.9.0: one retrieval pipeline over the shared hs_* collections, which
+    # are no longer treated differently by name.
+    "RAG_COLLECTION_1": "RAG_COLLECTIONS",
+    "RAG_COLLECTION_2": "RAG_COLLECTIONS",
+    "RAG_COLLECTION_3": "RAG_COLLECTIONS",
+    "RAG_COLLECTION_4": "RAG_COLLECTIONS",
+    "RAG_COLLECTION_5": "RAG_COLLECTIONS",
+    "RAG_TOP_K": "RAG_CANDIDATES and RAG_TOP_N",
+    "RAG_TOP_K_EVENTS": "RAG_CANDIDATES and RAG_TOP_N",
+    "RAG_TOP_K_SLACK": "RAG_CANDIDATES and RAG_TOP_N",
+    "RAG_TOP_K_CALIBRE": "RAG_CANDIDATES and RAG_TOP_N",
+    "RERANK_CANDIDATES": "RAG_CANDIDATES",
+    "RERANK_TOP_N": "RAG_TOP_N",
 }
+
+DEFAULT_COLLECTIONS: tuple[str, ...] = ("hs_member", "hs_catalog")
+
+# The member bot's own instructions; the answering rules shared by both bots
+# are fixed in llm.ANSWERING_RULES and always come first.
+DEFAULT_SYSTEM_PROMPT = (
+    "You are Chat Hacksman, the PDX Hackerspace assistant for logged-in members. "
+    "Help members find resources, policies and procedures, and explain how the "
+    "space's own devices are built.\n"
+    "- Entering and leaving: explain fob use at the main entrance and the back gate, "
+    "what the camera display is for, and how to read the exit dashboard. Always add "
+    "that the dashboard's sensors can be wrong, so members should check doors "
+    "physically before leaving.\n"
+    '- "Where is" questions: give the location and the map link from the context.\n'
+    "- Library questions: answer from the catalog entries, merging ebook, audiobook "
+    "and hardcopy formats of the same work into one answer.\n"
+    "- When you can't answer, suggest the Slack channel or wiki page the context "
+    "points to, or asking at the open house."
+)
+
+DEFAULT_NO_ANSWER_MESSAGE = (
+    "I couldn't find that in anything I can search: the wiki, policies, signs, "
+    "manuals or the library catalog. Try searching the wiki, asking in the space's "
+    "Slack, or asking at the next open house. Infrastructure admins handle anything "
+    "about changing or reconfiguring the space's systems."
+)
 
 DEFAULT_EMBEDDING_MODEL = "nomic-ai/modernbert-embed-base"
 DEFAULT_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
@@ -122,8 +161,12 @@ def _optional_url(env: Mapping[str, str], name: str) -> str | None:
     return _url(env, name, "") if env.get(name, "").strip() else None
 
 
-def _optional_int(env: Mapping[str, str], name: str, minimum: int) -> int | None:
-    return _int(env, name, 0, minimum=minimum) if env.get(name, "").strip() else None
+def _name(env: Mapping[str, str], name: str, default: str) -> str:
+    """A vector name: unset is the default, "none" is empty (no name)."""
+    value = env.get(name, "").strip()
+    if not value:
+        return default
+    return "" if value.lower() == "none" else value
 
 
 def _optional_float(env: Mapping[str, str], name: str) -> float | None:
@@ -138,8 +181,14 @@ def _rerank_api(env: Mapping[str, str]) -> RerankApi:
     raise ConfigError(f"RERANK_API must be one of {', '.join(RERANK_APIS)}, not {value!r}")
 
 
-def _split_collections(value: str) -> list[str]:
+def _split(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _list(env: Mapping[str, str], name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """A comma-separated list, in order without duplicates; unset or empty is the default."""
+    items = _split(env.get(name, ""))
+    return tuple(dict.fromkeys(items)) if items else default
 
 
 @dataclass(frozen=True)
@@ -153,12 +202,26 @@ class Settings:
     topics_cache_ttl_seconds: int = 300
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = None
-    rag_collections: tuple[str, ...] = ()
-    rag_top_k: int = 4
-    rag_top_k_events: int = 3
-    rag_top_k_slack: int = 3
-    rag_top_k_calibre: int = 2
+    rag_collections: tuple[str, ...] = DEFAULT_COLLECTIONS
+    # Hits per collection from the (hybrid) search, before reranking.
+    rag_candidates: int = 50
+    # Chunks given to the model, after reranking and the authority pass.
+    rag_top_n: int = 8
+    # Only applied to dense-only search; fused hybrid scores are rank-based.
     rag_min_score: float = 0.5
+    # Named vectors in each collection. Empty dense name: the unnamed vector.
+    # Empty sparse name: dense-only search.
+    rag_dense_vector: str = "dense"
+    rag_sparse_vector: str = "sparse"
+    rag_sparse_model: str = "qdrant/bm25"
+    # Points with any other tier are never used, whatever collection they're in.
+    rag_allowed_tiers: tuple[str, ...] = ("public", "member")
+    # How much authority (1-5) can lift a chunk whose relevance is close to
+    # another's, on relevance scaled to 0-1 over the candidates.
+    rag_authority_weight: float = 0.1
+    # Earlier turns of the conversation sent with each question.
+    chat_history_turns: int = 6
+    no_answer_message: str = DEFAULT_NO_ANSWER_MESSAGE
     embedding_url: str = "http://localhost:8080/v1"
     embedding_api_key: str | None = None
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
@@ -169,8 +232,6 @@ class Settings:
     rerank_api: RerankApi = "jina"
     rerank_api_key: str | None = None
     rerank_model: str = DEFAULT_RERANK_MODEL
-    rerank_candidates: int = 10
-    rerank_top_n: int | None = None
     rerank_min_score: float | None = None
     rerank_context_length: int = 8192
     rerank_timeout_seconds: float = 30.0
@@ -181,9 +242,7 @@ class Settings:
     llm_api_key: str | None = None
     # Empty: the first model the server lists.
     llm_model: str = ""
-    default_system_prompt: str = (
-        "You are Chat Hacksman, an expert assistant for hackerspace members."
-    )
+    default_system_prompt: str = DEFAULT_SYSTEM_PROMPT
     basic_auth_username: str | None = None
     basic_auth_password: str | None = None
     sentry_dsn: str | None = None
@@ -206,16 +265,9 @@ class Settings:
             if env.get(name, "").strip():
                 raise ConfigError(f"{name} is no longer used; set {replacement} instead")
 
-        collections = _split_collections(env.get("RAG_COLLECTIONS", ""))
-        for value in (
-            env.get("RAG_COLLECTION_1", ""),
-            env.get("RAG_COLLECTION_2", ""),
-            env.get("RAG_COLLECTION_3", ""),
-            env.get("RAG_COLLECTION_4", ""),
-            env.get("RAG_COLLECTION_5", ""),
-        ):
-            if value.strip():
-                collections.append(value.strip())
+        tiers = _list(env, "RAG_ALLOWED_TIERS", cls.rag_allowed_tiers)
+        if "admin" in (tier.lower() for tier in tiers):
+            raise ConfigError("RAG_ALLOWED_TIERS must never include admin")
 
         embedding_model = env.get("EMBEDDING_MODEL", "").strip() or cls.embedding_model
         prefix_text = env.get("EMBEDDING_QUERY_PREFIX")
@@ -237,13 +289,19 @@ class Settings:
             ),
             qdrant_url=_url(env, "QDRANT_URL", cls.qdrant_url),
             qdrant_api_key=_optional(env, "QDRANT_API_KEY"),
-            # Keep order but remove duplicates.
-            rag_collections=tuple(dict.fromkeys(collections)),
-            rag_top_k=_int(env, "RAG_TOP_K", cls.rag_top_k, minimum=1),
-            rag_top_k_events=_int(env, "RAG_TOP_K_EVENTS", cls.rag_top_k_events, minimum=1),
-            rag_top_k_slack=_int(env, "RAG_TOP_K_SLACK", cls.rag_top_k_slack, minimum=1),
-            rag_top_k_calibre=_int(env, "RAG_TOP_K_CALIBRE", cls.rag_top_k_calibre, minimum=1),
+            rag_collections=_list(env, "RAG_COLLECTIONS", cls.rag_collections),
+            rag_candidates=_int(env, "RAG_CANDIDATES", cls.rag_candidates, minimum=1),
+            rag_top_n=_int(env, "RAG_TOP_N", cls.rag_top_n, minimum=1),
             rag_min_score=_float(env, "RAG_MIN_SCORE", cls.rag_min_score, minimum=-1.0),
+            rag_dense_vector=_name(env, "RAG_DENSE_VECTOR", cls.rag_dense_vector),
+            rag_sparse_vector=_name(env, "RAG_SPARSE_VECTOR", cls.rag_sparse_vector),
+            rag_sparse_model=env.get("RAG_SPARSE_MODEL", "").strip() or cls.rag_sparse_model,
+            rag_allowed_tiers=tiers,
+            rag_authority_weight=_float(
+                env, "RAG_AUTHORITY_WEIGHT", cls.rag_authority_weight, minimum=0.0
+            ),
+            chat_history_turns=_int(env, "CHAT_HISTORY_TURNS", cls.chat_history_turns),
+            no_answer_message=(env.get("NO_ANSWER_MESSAGE", "").strip() or cls.no_answer_message),
             embedding_url=_url(env, "EMBEDDING_URL", cls.embedding_url),
             embedding_api_key=_optional(env, "EMBEDDING_API_KEY"),
             embedding_model=embedding_model,
@@ -258,8 +316,6 @@ class Settings:
             rerank_api=_rerank_api(env),
             rerank_api_key=_optional(env, "RERANK_API_KEY"),
             rerank_model=env.get("RERANK_MODEL", "").strip() or cls.rerank_model,
-            rerank_candidates=_int(env, "RERANK_CANDIDATES", cls.rerank_candidates, minimum=1),
-            rerank_top_n=_optional_int(env, "RERANK_TOP_N", minimum=1),
             rerank_min_score=_optional_float(env, "RERANK_MIN_SCORE"),
             rerank_context_length=_int(
                 env, "RERANK_CONTEXT_LENGTH", cls.rerank_context_length, minimum=1
