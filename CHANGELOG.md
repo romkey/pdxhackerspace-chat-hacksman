@@ -7,6 +7,8 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-19
+
 ### Added
 
 - `LLM_EXTRA_BODY`: a JSON object merged into every chat request, e.g.
