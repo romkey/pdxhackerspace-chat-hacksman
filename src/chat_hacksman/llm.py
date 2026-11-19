@@ -146,6 +146,32 @@ def _auth_headers(api_key: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
 
+def _reasoning(part: Any) -> str:
+    """Reasoning ("thinking") text in a message or stream delta, which
+    servers put in reasoning_content (llama.cpp, vLLM) or reasoning."""
+    if not isinstance(part, dict):
+        return ""
+    for key in ("reasoning_content", "reasoning"):
+        value = part.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def empty_answer_error(finish_reason: Any, reasoned: bool, max_tokens: int) -> LlmError:
+    """Why the model gave no answer, and what to do about it."""
+    if reasoned and finish_reason == "length":
+        return LlmError(
+            f"The model spent all {max_tokens} max_tokens reasoning and wrote no answer. "
+            "Turn reasoning off with LLM_EXTRA_BODY, or raise max_tokens."
+        )
+    if reasoned:
+        return LlmError(
+            "The model wrote only reasoning, no answer. Turn reasoning off with LLM_EXTRA_BODY."
+        )
+    return LlmError(f"The model returned an empty answer (finish_reason={finish_reason}).")
+
+
 def _result(
     *,
     answer: str,
@@ -208,6 +234,8 @@ class LlmService:
     request_timeout_seconds: float = 180.0
     retry_attempts: int = 2
     retry_backoff_seconds: float = 0.5
+    # Merged into every chat request (LLM_EXTRA_BODY); the bot's own fields win.
+    extra_body: dict[str, Any] = field(default_factory=dict)
 
     def _url(self, path: str) -> str:
         return f"{self.base_url.rstrip('/')}/{path}"
@@ -304,7 +332,7 @@ class LlmService:
         }
         if tweaks.seed is not None:
             payload["seed"] = tweaks.seed
-        return payload
+        return {**self.extra_body, **payload}
 
     async def chat(
         self,
@@ -331,8 +359,14 @@ class LlmService:
         first = choices[0] if isinstance(choices, list) and choices else None
         message = first.get("message") if isinstance(first, dict) else None
         content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, str) or not isinstance(first, dict):
+        if not isinstance(first, dict) or not isinstance(message, dict):
             raise LlmError("LLM server returned an unexpected chat completion payload.")
+        if not isinstance(content, str) or not content.strip():
+            raise empty_answer_error(
+                first.get("finish_reason"),
+                bool(_reasoning(message)),
+                settings.tweaks.max_tokens,
+            )
         return _result(
             answer=content,
             model=model,
@@ -355,7 +389,8 @@ class LlmService:
         Server-sent events from {base_url}/chat/completions with stream=true:
         `data: {json}` lines, each with choices[0].delta.content, ending
         with `data: [DONE]`. Raises LlmError before the first piece if the
-        server fails.
+        server fails, and at the end if no answer came (only reasoning, or
+        nothing).
         """
         started = perf_counter()
         model = await self.resolve_model(settings.model)
@@ -370,6 +405,7 @@ class LlmService:
         last: dict[str, Any] = {}
         finish_reason: Any = None
         first_token_ms: float | None = None
+        reasoned = False
         try:
             async with (
                 httpx.AsyncClient(timeout=self.request_timeout_seconds) as client,
@@ -402,6 +438,7 @@ class LlmService:
                         continue
                     finish_reason = first.get("finish_reason") or finish_reason
                     delta = first.get("delta")
+                    reasoned = reasoned or bool(_reasoning(delta))
                     piece = delta.get("content") if isinstance(delta, dict) else None
                     if isinstance(piece, str) and piece:
                         if first_token_ms is None:
@@ -412,6 +449,8 @@ class LlmService:
             raise LlmError(
                 f"LLM request failed: error_type={type(exc).__name__} error={exc}"
             ) from exc
+        if not "".join(state.parts).strip():
+            raise empty_answer_error(finish_reason, reasoned, settings.tweaks.max_tokens)
         state.result = _result(
             answer="".join(state.parts),
             model=model,
@@ -436,6 +475,7 @@ class LlmService:
             data = await self._post_json_with_retries(
                 url=self._url("chat/completions"),
                 payload={
+                    **self.extra_body,
                     "model": model,
                     "messages": [
                         {"role": "system", "content": REWRITE_PROMPT},

@@ -101,6 +101,9 @@ def test_strips_trailing_slash_from_urls() -> None:
         ("LOG_LEVEL", "loud", "LOG_LEVEL"),
         ("LLM_URL", "localhost:8080", "LLM_URL must be an http"),
         ("EMBEDDING_URL", "localhost:8080", "EMBEDDING_URL must be an http"),
+        ("LLM_EXTRA_BODY", "{nope", "LLM_EXTRA_BODY must be a JSON object"),
+        ("LLM_EXTRA_BODY", "[1, 2]", "LLM_EXTRA_BODY must be a JSON object"),
+        ("LLM_EXTRA_BODY", '{"model": "x", "stream": true}', "can't set model, stream"),
     ],
 )
 def test_rejects_bad_values(name: str, value: str, message: str) -> None:
@@ -213,6 +216,15 @@ def test_llm_settings() -> None:
     )
     assert settings.llm_url == "https://api.openai.com/v1"
     assert settings.llm_model == "gpt-4o-mini"
+
+
+def test_llm_extra_body() -> None:
+    assert Settings.from_env({}).llm_extra_body == {}
+    assert Settings.from_env({"LLM_EXTRA_BODY": "  "}).llm_extra_body == {}
+    settings = Settings.from_env(
+        {"LLM_EXTRA_BODY": '{"chat_template_kwargs": {"enable_thinking": false}}'}
+    )
+    assert settings.llm_extra_body == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 @pytest.mark.parametrize(

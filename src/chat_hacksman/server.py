@@ -110,6 +110,7 @@ def build_services(settings: Settings) -> Services:
             request_timeout_seconds=settings.llm_timeout_seconds,
             retry_attempts=settings.llm_retry_attempts,
             retry_backoff_seconds=settings.llm_retry_backoff_seconds,
+            extra_body=settings.llm_extra_body,
         ),
     )
 

@@ -4,11 +4,15 @@ Every variable is documented in docs/configuration.md and listed, with a
 safe example value, in .env.example.
 """
 
+import json
 import logging
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+# Any: LLM_EXTRA_BODY is arbitrary JSON for the chat server.
+from typing import Any
 
 from chat_hacksman.rerank import RERANK_APIS, RerankApi
 
@@ -185,6 +189,27 @@ def _split(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+# Fields of every chat request that LLM_EXTRA_BODY can't replace.
+LLM_RESERVED_FIELDS = ("model", "messages", "stream")
+
+
+def _json_object(env: Mapping[str, str], name: str) -> dict[str, Any]:
+    """A JSON object; unset or empty is {}."""
+    text = env.get(name, "").strip()
+    if not text:
+        return {}
+    try:
+        value = json.loads(text)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a JSON object: {exc}") from None
+    if not isinstance(value, dict):
+        raise ConfigError(f"{name} must be a JSON object, not {text!r}")
+    reserved = [key for key in LLM_RESERVED_FIELDS if key in value]
+    if reserved:
+        raise ConfigError(f"{name} can't set {', '.join(reserved)}")
+    return value
+
+
 def _list(env: Mapping[str, str], name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     """A comma-separated list, in order without duplicates; unset or empty is the default."""
     items = _split(env.get(name, ""))
@@ -242,6 +267,8 @@ class Settings:
     llm_api_key: str | None = None
     # Empty: the first model the server lists.
     llm_model: str = ""
+    # Merged into every chat request body, e.g. to turn reasoning off.
+    llm_extra_body: dict[str, Any] = field(default_factory=dict)
     default_system_prompt: str = DEFAULT_SYSTEM_PROMPT
     basic_auth_username: str | None = None
     basic_auth_password: str | None = None
@@ -331,6 +358,7 @@ class Settings:
             llm_url=_url(env, "LLM_URL", cls.llm_url),
             llm_api_key=_optional(env, "LLM_API_KEY"),
             llm_model=env.get("LLM_MODEL", "").strip(),
+            llm_extra_body=_json_object(env, "LLM_EXTRA_BODY"),
             default_system_prompt=(
                 env.get("DEFAULT_SYSTEM_PROMPT", "").strip() or cls.default_system_prompt
             ),
