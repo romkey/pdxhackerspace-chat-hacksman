@@ -475,12 +475,13 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
             return render_login("/", "Single sign-on is turned off.", 404)
         if error:
             logger.warning("OIDC provider refused the login: %s %s", error, error_description)
-            return render_login("/", f"Login refused: {error_description or error}", 401)
+            return render_login("/", "The single sign-on provider refused the login.", 401)
         try:
             username, next_path = await oidc.finish(state, code)
         except OidcError as exc:
             logger.warning("OIDC login failed: %s", exc)
-            return render_login("/", f"Login failed: {exc}", 401)
+            # The reason goes to the log only, not to the browser.
+            return render_login("/", "Single sign-on failed; try again.", 401)
         logger.info("OIDC login succeeded")
         return logged_in(request, username, next_path)
 

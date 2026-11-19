@@ -194,7 +194,7 @@ def test_oidc_login(make_client: MakeClient, mock_http: MockHttp) -> None:
         # A state is good once.
         replay = client.get(f"/auth/oidc/callback?state={state}&code=abc")
         assert replay.status_code == 401
-        assert "unknown or expired login" in replay.text
+        assert "Single sign-on failed" in replay.text
 
         local = client.post("/login", data={"username": "alice", "password": PASSWORD})
         assert local.status_code == 403
@@ -210,7 +210,11 @@ def test_oidc_login(make_client: MakeClient, mock_http: MockHttp) -> None:
     ],
 )
 def test_oidc_rejects_untrustworthy_id_tokens(
-    make_client: MakeClient, mock_http: MockHttp, claims: dict[str, Any], message: str
+    make_client: MakeClient,
+    mock_http: MockHttp,
+    caplog: pytest.LogCaptureFixture,
+    claims: dict[str, Any],
+    message: str,
 ) -> None:
     provider = FakeProvider(**claims)
     mock_http(provider.handler)
@@ -218,7 +222,10 @@ def test_oidc_rejects_untrustworthy_id_tokens(
         state = _start_sso(client, provider)
         response = client.get(f"/auth/oidc/callback?state={state}&code=abc")
         assert response.status_code == 401
-        assert message in response.text
+        # The reason is logged, never shown.
+        assert "Single sign-on failed" in response.text
+        assert message not in response.text
+        assert message in caplog.text
         assert client.get("/api/settings").status_code == 401
     # A public client sends no secret.
     assert "client_secret" not in provider.token_requests[0]
@@ -232,7 +239,8 @@ def test_oidc_provider_errors(make_client: MakeClient, mock_http: MockHttp) -> N
         assert "unavailable" in down.text
         refused = client.get("/auth/oidc/callback?error=access_denied&error_description=No+way")
         assert refused.status_code == 401
-        assert "No way" in refused.text
+        assert "refused the login" in refused.text
+        assert "No way" not in refused.text
 
 
 def test_oidc_routes_without_oidc(make_client: MakeClient) -> None:
@@ -298,6 +306,9 @@ def test_username_from_claims() -> None:
         ("https://evil.example", "/"),
         ("//evil.example", "/"),
         ("/\\evil.example", "/"),
+        ("/\t/evil.example", "/"),
+        ("/\n/evil.example", "/"),
+        ("/ /evil.example", "/"),
     ],
 )
 def test_safe_next(value: str | None, expected: str) -> None:

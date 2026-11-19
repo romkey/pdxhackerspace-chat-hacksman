@@ -42,10 +42,21 @@ def hash_token(token: str) -> str:
 
 
 def safe_next(value: str | None) -> str:
-    """A path on this app to return to after logging in; "/" for anything else."""
-    if not value or not value.startswith("/") or value.startswith("//") or "\\" in value:
+    """A path on this app to return to after logging in; "/" for anything else.
+
+    Browsers drop tabs and newlines and read a backslash as a slash, so
+    "/\t/evil.example" would be another site; those are refused too.
+    """
+    if (
+        not value
+        or not value.startswith("/")
+        or value.startswith("//")
+        or "\\" in value
+        or any(char.isspace() or ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+    ):
         return "/"
-    return value
+    # Rebuilt on a constant "/" so the result can only be a path on this host.
+    return "/" + value[1:]
 
 
 def local_login_valid(
