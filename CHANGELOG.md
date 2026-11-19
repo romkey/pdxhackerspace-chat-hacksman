@@ -7,6 +7,8 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-19
+
 ### Changed
 
 - Chat answers are rendered as markdown (headings, lists, emphasis, code,
