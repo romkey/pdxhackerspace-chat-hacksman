@@ -189,6 +189,75 @@ def test_chat_stream_raises_on_server_errors(mock_http: Callable[[Handler], None
         _collect(service, StreamState())
 
 
+@pytest.mark.parametrize(
+    ("events", "message"),
+    [
+        (
+            [
+                {"choices": [{"delta": {"reasoning_content": "Hmm, the laser..."}}]},
+                {"choices": [{"delta": {}, "finish_reason": "length"}]},
+            ],
+            "spent all 512 max_tokens reasoning",
+        ),
+        (
+            [
+                {"choices": [{"delta": {"reasoning": "Hmm."}}]},
+                {"choices": [{"delta": {"content": " "}, "finish_reason": "stop"}]},
+            ],
+            "only reasoning, no answer",
+        ),
+        ([], r"empty answer \(finish_reason=None\)"),
+    ],
+)
+def test_chat_stream_without_an_answer_says_why(
+    mock_http: Callable[[Handler], None], events: list[object], message: str
+) -> None:
+    mock_http(lambda request: _sse(*events))
+    service = LlmService(base_url="http://llm.local/v1", default_model="m")
+    state = StreamState()
+    with pytest.raises(LlmError, match=message):
+        _collect(service, state)
+    assert state.result is None
+
+
+def test_chat_without_an_answer_says_why(mock_http: Callable[[Handler], None]) -> None:
+    body = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "", "reasoning_content": "Hmm."},
+                "finish_reason": "length",
+            }
+        ]
+    }
+    mock_http(lambda request: httpx.Response(200, json=body))
+    service = LlmService(base_url="http://llm.local/v1", default_model="m")
+    with pytest.raises(LlmError, match="max_tokens reasoning"):
+        asyncio.run(service.chat(settings=AppSettings(system_prompt="p"), question="q", context=[]))
+
+
+def test_extra_body_goes_in_every_request_but_cannot_replace_the_bots_fields(
+    mock_http: Callable[[Handler], None],
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return _completion()
+
+    mock_http(handler)
+    extra = {"chat_template_kwargs": {"enable_thinking": False}, "max_tokens": 9999}
+    service = LlmService(base_url="http://llm.local/v1", default_model="m", extra_body=extra)
+    settings = AppSettings(system_prompt="p")
+    asyncio.run(service.chat(settings=settings, question="q", context=[]))
+    asyncio.run(
+        service.rewrite_query(
+            settings=settings, question="q", history=[ChatTurn(role="user", content="x")]
+        )
+    )
+    assert [body["chat_template_kwargs"] for body in seen] == [{"enable_thinking": False}] * 2
+    assert [body["max_tokens"] for body in seen] == [512, 128]
+
+
 def test_rewrite_query_uses_the_conversation(mock_http: Callable[[Handler], None]) -> None:
     seen: list[httpx.Request] = []
 

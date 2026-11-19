@@ -7,6 +7,26 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+### Added
+
+- `LLM_EXTRA_BODY`: a JSON object merged into every chat request, e.g.
+  `{"chat_template_kwargs": {"enable_thinking": false}}` to turn a
+  reasoning model's thinking off. `.env.example` sets that.
+
+### Fixed
+
+- An empty answer from the model is reported as an error saying why (for
+  example, a reasoning model used all of `max_tokens` thinking), instead
+  of showing nothing.
+- A configured collection that doesn't exist in Qdrant is skipped quietly
+  and looked for again every 5 minutes, instead of logging warnings on
+  every question.
+
+### Changed
+
+- `.env.example` sets `RAG_CANDIDATES=20` and `RERANK_CONTEXT_LENGTH=512`,
+  which rerank much faster; the built-in defaults are unchanged.
+
 ## [0.9.0] - 2026-11-18
 
 ### Changed

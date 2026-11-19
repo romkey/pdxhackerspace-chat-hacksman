@@ -158,6 +158,59 @@ def test_retrieve_skips_unknown_collections_and_dimension_mismatch(
     assert asyncio.run(service.retrieve("q", enabled_collections=["x"])) == []
 
 
+class NotFoundError(Exception):
+    status_code = 404
+
+
+def test_missing_collections_are_skipped_then_looked_for_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service()
+    client = FakeClient({"hs_member": [_hit("a", 0.9)]})
+    lookups: list[str] = []
+    real_get_collection = client.get_collection
+
+    def get_collection(*, collection_name: str) -> SimpleNamespace:
+        lookups.append(collection_name)
+        if collection_name == "hs_catalog":
+            raise NotFoundError("Not found: Collection `hs_catalog` doesn't exist!")
+        return real_get_collection(collection_name=collection_name)
+
+    client.get_collection = get_collection  # type: ignore[method-assign]
+    _install(monkeypatch, service, client)
+    clock = [1000.0]
+    monkeypatch.setattr(rag_module, "_monotonic", lambda: clock[0])
+
+    assert [chunk.text for chunk in asyncio.run(service.retrieve("q"))] == ["a"]
+    assert [chunk.text for chunk in asyncio.run(service.retrieve("q"))] == ["a"]
+    assert lookups == ["hs_member", "hs_catalog"]
+    assert [call["collection_name"] for call in client.calls] == ["hs_member", "hs_member"]
+
+    clock[0] += rag_module.MISSING_COLLECTION_RECHECK_SECONDS
+    asyncio.run(service.retrieve("q"))
+    assert lookups == ["hs_member", "hs_catalog", "hs_catalog"]
+
+
+def test_collection_deleted_after_its_lookup_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service()
+    client = FakeClient({"hs_member": [_hit("a", 0.9)]})
+    catalog_queries: list[dict[str, Any]] = []
+
+    def query_points(**kwargs: Any) -> SimpleNamespace:
+        if kwargs["collection_name"] == "hs_catalog":
+            catalog_queries.append(kwargs)
+            raise NotFoundError("gone")
+        return FakeClient.query_points(client, **kwargs)
+
+    client.query_points = query_points  # type: ignore[method-assign]
+    _install(monkeypatch, service, client)
+    assert [chunk.text for chunk in asyncio.run(service.retrieve("q"))] == ["a"]
+    assert [chunk.text for chunk in asyncio.run(service.retrieve("q"))] == ["a"]
+    # One hybrid query: not retried as dense search, and not searched again.
+    assert len(catalog_queries) == 1
+    assert "prefetch" in catalog_queries[0]
+
+
 def test_retrieve_drops_points_without_text_and_survives_search_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

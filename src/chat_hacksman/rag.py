@@ -11,6 +11,7 @@ policy, signs and the wiki over manuals and Slack when relevance is close.
 """
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -36,6 +37,19 @@ from chat_hacksman.models import ContextChunk
 from chat_hacksman.rerank import Reranker
 
 logger = logging.getLogger(__name__)
+
+# A collection Qdrant says doesn't exist (e.g. hs_catalog before its
+# ingester runs) is skipped for this long before it's looked for again.
+MISSING_COLLECTION_RECHECK_SECONDS = 300.0
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+def _is_not_found(exc: Exception) -> bool:
+    return getattr(exc, "status_code", None) == 404
+
 
 # Authority of space-written rules (policy documents and signs).
 POLICY_AUTHORITY = 5
@@ -145,6 +159,8 @@ class RagService:
     reranker: Reranker | None = None
     rerank_min_score: float | None = None
     _collection_vector_dims: dict[str, int | None] = field(default_factory=dict)
+    # Collection -> _monotonic() until which it's taken to be missing.
+    _missing_until: dict[str, float] = field(default_factory=dict)
     _client: QdrantClient | None = None
 
     @property
@@ -318,6 +334,8 @@ class RagService:
             try:
                 return self._hybrid_search(client, collection, vector, query, query_filter)
             except Exception as exc:
+                if _is_not_found(exc):
+                    raise
                 logger.warning(
                     "Hybrid search failed collection=%s error_type=%s error=%s; "
                     "falling back to dense search",
@@ -340,12 +358,32 @@ class RagService:
             size = None if self.dense_vector else getattr(vectors, "size", None)
         return size if isinstance(size, int) else None
 
+    def _is_missing(self, collection: str) -> bool:
+        until = self._missing_until.get(collection)
+        if until is None:
+            return False
+        if _monotonic() < until:
+            return True
+        del self._missing_until[collection]
+        return False
+
+    def _mark_missing(self, collection: str) -> None:
+        logger.info(
+            "Collection %s doesn't exist in Qdrant; skipping it for %d s",
+            collection,
+            MISSING_COLLECTION_RECHECK_SECONDS,
+        )
+        self._missing_until[collection] = _monotonic() + MISSING_COLLECTION_RECHECK_SECONDS
+
     def _get_collection_vector_dim(self, client: QdrantClient, collection: str) -> int | None:
         if collection in self._collection_vector_dims:
             return self._collection_vector_dims[collection]
         try:
             vector_dim = self._extract_vector_dim(client.get_collection(collection_name=collection))
         except Exception as exc:
+            if _is_not_found(exc):
+                self._mark_missing(collection)
+                return None
             logger.warning("Failed to read vector dimension for collection=%s: %s", collection, exc)
             vector_dim = None
         if vector_dim is None:
@@ -377,7 +415,11 @@ class RagService:
         query_filter = self.base_filter()
         candidates: list[ContextChunk] = []
         for collection in target_collections:
+            if self._is_missing(collection):
+                continue
             expected_dim = self._get_collection_vector_dim(client, collection)
+            if self._is_missing(collection):
+                continue
             if expected_dim is not None and expected_dim != len(vector):
                 logger.warning(
                     "Skipping collection=%s due to vector dimension mismatch "
@@ -391,6 +433,9 @@ class RagService:
             try:
                 hits = self._search_collection(client, collection, vector, query, query_filter)
             except Exception as exc:
+                if _is_not_found(exc):
+                    self._mark_missing(collection)
+                    continue
                 logger.warning(
                     "Qdrant search failed collection=%s error_type=%s error=%s",
                     collection,

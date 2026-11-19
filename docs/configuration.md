@@ -35,14 +35,16 @@ searched both ways and the results fused with reciprocal rank fusion. The
 sparse query's text is embedded by Qdrant itself (server-side BM25
 inference, `qdrant/bm25`); check that the running Qdrant supports it and
 that the ingester's vector names match. If the hybrid query fails, dense
-search alone is used.
+search alone is used. A configured collection that doesn't exist yet (such
+as `hs_catalog` before its ingester has run) is skipped, and looked for
+again every 5 minutes.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant server |
 | `QDRANT_API_KEY` | unset | Secret. Qdrant API key; use one that can read only the member bot's collections |
 | `RAG_COLLECTIONS` | `hs_member,hs_catalog` | Comma-separated collections to search. Never `hs_public` alone for the member bot; never the member collections for the public bot |
-| `RAG_CANDIDATES` | `50` | Hits per collection from the fused search, for the reranker to choose from |
+| `RAG_CANDIDATES` | `50` | Hits per collection from the fused search, for the reranker to choose from. Every hit is reranked, so on a slow reranker fewer (e.g. `20`) answer much faster |
 | `RAG_TOP_N` | `8` | Chunks given to the model |
 | `RAG_DENSE_VECTOR` | `dense` | Name of the dense vector; `none` for an unnamed vector |
 | `RAG_SPARSE_VECTOR` | `sparse` | Name of the sparse (BM25) vector; `none` for dense-only search |
@@ -105,7 +107,7 @@ no-answer message.
 | `RERANK_API_KEY` | unset | Secret. Sent as `Authorization: Bearer ...` |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | Model name (not sent with `tei`, which serves one model) |
 | `RERANK_MIN_SCORE` | unset | Drop chunks scored below this. The scale depends on the server and model (TEI returns 0-1; llama.cpp can return raw scores, about -11 to 4 for `bge-reranker-v2-m3`), so check a few `rerank_score` values in chat responses first |
-| `RERANK_CONTEXT_LENGTH` | `8192` | Tokens per question + chunk pair; the question gets at most a quarter, chunks are cut to fit the rest |
+| `RERANK_CONTEXT_LENGTH` | `8192` | Tokens per question + chunk pair; the question gets at most a quarter, chunks are cut to fit the rest. The pipeline's chunks are 300-500 tokens, so `512` loses little and reranks much faster |
 | `RERANK_TIMEOUT_SECONDS` | `30` | Timeout for each rerank request |
 
 Where to get one (any of these serve the default model):
@@ -146,6 +148,24 @@ at `GET {LLM_URL}/models`, or leave it on the default.
 | `LLM_TIMEOUT_SECONDS` | `180` | Timeout for each chat request |
 | `LLM_RETRY_ATTEMPTS` | `2` | Attempts per chat request when the connection fails or times out |
 | `LLM_RETRY_BACKOFF_SECONDS` | `0.5` | Wait before retrying; the nth retry waits n times this |
+| `LLM_EXTRA_BODY` | unset | A JSON object merged into every chat request body (answers and the query rewrite), for server-specific options. It can't set `model`, `messages` or `stream`, and the bot's own fields (`temperature`, `top_p`, `max_tokens`, `seed`) win. See [Reasoning models](#reasoning-models) |
+
+### Reasoning models
+
+A reasoning ("thinking") model writes its reasoning before the answer, and
+the reasoning counts against `max_tokens` (512 by default in the UI). It
+can use them all and answer nothing; the bot then reports why instead of
+showing an empty answer. Turn reasoning off for this bot: its answers come
+from the sources, so it gains little from it.
+
+| Model / server | `LLM_EXTRA_BODY` | Or on the server |
+|----------------|------------------|------------------|
+| Qwen3 and other chat templates with `enable_thinking`, on llama.cpp or vLLM | `{"chat_template_kwargs": {"enable_thinking": false}}` | llama.cpp: `--reasoning-budget 0`; vLLM: `--default-chat-template-kwargs '{"enable_thinking": false}'` |
+| gpt-oss, OpenAI reasoning models | `{"reasoning_effort": "low"}` (can't be fully off) | |
+
+A server ignores fields it doesn't understand, but a router in between
+(LiteLLM, llama-swap) may reject or drop them; both can also set these per
+model themselves.
 
 `DEFAULT_PROVIDER`, `DEFAULT_LLM_BASE_URL`, `DEFAULT_MODEL` and
 `OLLAMA_API_KEY` were replaced by the variables above in 0.8.0;
