@@ -7,6 +7,13 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+### Changed
+
+- Chat answers are rendered as markdown (headings, lists, emphasis, code,
+  tables, quotes, links) instead of plain text. Citations like [2] link to
+  their source below the answer. The renderer builds DOM nodes, so HTML in
+  an answer shows as text, and links are limited to http and https.
+
 ## [0.10.0] - 2026-11-19
 
 ### Added
