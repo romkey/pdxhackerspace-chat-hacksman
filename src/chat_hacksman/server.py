@@ -3,8 +3,10 @@
 create_app() builds it from Settings; nothing here reads the environment.
 """
 
+import hashlib
 import json
 import logging
+import re
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
@@ -20,7 +22,6 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
-    FileResponse,
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
@@ -150,6 +151,26 @@ def build_reranker(settings: Settings) -> Reranker | None:
 def _is_https(request: Request) -> bool:
     forwarded = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
     return request.url.scheme == "https" or forwarded == "https"
+
+
+def _external_url(request: Request, url: str) -> str:
+    """url as the browser sees it: https when a TLS proxy says so."""
+    if _is_https(request) and url.startswith("http://"):
+        return "https://" + url.removeprefix("http://")
+    return url
+
+
+def asset_version() -> str:
+    """A hash of the UI's scripts, so a changed script is never served from cache."""
+    digest = hashlib.sha256()
+    for path in sorted(STATIC_DIR.glob("*.js")):
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
+def _index_html() -> str:
+    page = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    return re.sub(r'(\.js)\?v=[^"]*"', rf'\1?v={asset_version()}"', page)
 
 
 def _client_ip_from_request(request: Request) -> str:
@@ -455,7 +476,9 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         next_path = safe_next(next)
         if oidc is None:
             return render_login(next_path, "Single sign-on is turned off.", 404)
-        redirect_uri = config.oidc_redirect_uri or str(request.url_for("oidc_callback"))
+        redirect_uri = config.oidc_redirect_uri or _external_url(
+            request, str(request.url_for("oidc_callback"))
+        )
         try:
             url = await oidc.authorization_url(redirect_uri, next_path)
         except OidcError as exc:
@@ -498,9 +521,11 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
     async def whoami(request: Request) -> WhoAmIResponse:
         return WhoAmIResponse(login_required=config.login_required, username=current_user(request))
 
+    index_html = _index_html()
+
     @app.get("/")
-    async def root() -> FileResponse:
-        return FileResponse(STATIC_DIR / "index.html")
+    async def root() -> HTMLResponse:
+        return HTMLResponse(index_html)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

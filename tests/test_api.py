@@ -292,6 +292,11 @@ def test_root_serves_the_ui(make_client: MakeClient) -> None:
         response = client.get("/")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
+    # Scripts carry a hash of their contents, so browsers never run a stale one.
+    version = server_module.asset_version()
+    assert f'/static/app.js?v={version}"' in response.text
+    assert f'/static/markdown.js?v={version}"' in response.text
+    assert "?v=dev" not in response.text
 
 
 def test_feedback_endpoint_records_and_returns_feedback(

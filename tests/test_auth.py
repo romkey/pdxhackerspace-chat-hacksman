@@ -261,6 +261,18 @@ def test_oidc_redirect_uri_setting(make_client: MakeClient, mock_http: MockHttp)
     assert query["redirect_uri"] == ["https://chat.example.org/auth/oidc/callback"]
 
 
+def test_oidc_redirect_uri_behind_https_proxy(make_client: MakeClient, mock_http: MockHttp) -> None:
+    mock_http(FakeProvider().handler)
+    with make_client(oidc_issuer=ISSUER, oidc_client_id=CLIENT_ID) as client:
+        response = client.get(
+            "/auth/oidc/login",
+            headers={"X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+    query = parse_qs(urlparse(response.headers["location"]).query)
+    assert query["redirect_uri"] == ["https://testserver/auth/oidc/callback"]
+
+
 def test_secure_cookie_behind_https_proxy(make_client: MakeClient) -> None:
     with make_client(local_login_username="alice", local_login_password=PASSWORD) as client:
         response = client.post(
