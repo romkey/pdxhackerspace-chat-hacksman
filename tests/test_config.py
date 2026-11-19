@@ -13,7 +13,8 @@ def test_defaults() -> None:
     assert settings.embedding_model == "nomic-ai/modernbert-embed-base"
     assert settings.embedding_query_prefix == "search_query: "
     assert settings.embedding_api_key is None
-    assert not settings.basic_auth_enabled
+    assert not settings.login_required
+    assert settings.oidc_login_label == "Login via Authentik"
 
 
 def test_collections_default_to_the_member_bots() -> None:
@@ -53,19 +54,58 @@ def test_admin_tier_is_never_allowed() -> None:
 
 def test_reads_secrets_and_optional_values() -> None:
     env = {
-        "BASIC_AUTH_USERNAME": "demo",
-        "BASIC_AUTH_PASSWORD": "dummy-password",
+        "LOCAL_LOGIN_USERNAME": "demo",
+        "LOCAL_LOGIN_PASSWORD": "dummy-password",
         "LLM_API_KEY": "dummy-llm-key",
         "EMBEDDING_API_KEY": "dummy-embedding-key",
         "QDRANT_API_KEY": "",
         "SENTRY_DSN": "https://public@example.ingest.sentry.io/1",
     }
     settings = Settings.from_env(env)
-    assert settings.basic_auth_enabled
+    assert settings.local_login_enabled
+    assert settings.login_required
+    assert not settings.oidc_enabled
     assert settings.llm_api_key == "dummy-llm-key"
     assert settings.embedding_api_key == "dummy-embedding-key"
     assert settings.qdrant_api_key is None
     assert settings.sentry_dsn == "https://public@example.ingest.sentry.io/1"
+
+
+def test_reads_oidc_settings() -> None:
+    env = {
+        "OIDC_ISSUER": "https://auth.example.org/application/o/chat/",
+        "OIDC_CLIENT_ID": "dummy-client",
+        "OIDC_CLIENT_SECRET": "dummy-secret",
+        "OIDC_LOGIN_LABEL": "Log in with the member account",
+        "OIDC_REDIRECT_URI": "https://chat.example.org/auth/oidc/callback",
+        "SESSION_DAYS": "7",
+    }
+    settings = Settings.from_env(env)
+    assert settings.oidc_enabled
+    assert settings.login_required
+    assert not settings.local_login_enabled
+    assert settings.oidc_issuer == "https://auth.example.org/application/o/chat"
+    assert settings.oidc_client_secret == "dummy-secret"  # noqa: S105
+    assert settings.oidc_scopes == "openid profile email"
+    assert settings.oidc_login_label == "Log in with the member account"
+    assert settings.oidc_redirect_uri == "https://chat.example.org/auth/oidc/callback"
+    assert settings.session_days == 7
+
+
+@pytest.mark.parametrize(
+    ("env", "message"),
+    [
+        ({"LOCAL_LOGIN_USERNAME": "demo"}, "LOCAL_LOGIN_PASSWORD"),
+        ({"LOCAL_LOGIN_PASSWORD": "dummy"}, "LOCAL_LOGIN_USERNAME"),
+        ({"OIDC_ISSUER": "https://auth.example.org"}, "OIDC_CLIENT_ID"),
+        ({"OIDC_CLIENT_ID": "dummy"}, "OIDC_ISSUER"),
+        ({"OIDC_ISSUER": "auth.example.org", "OIDC_CLIENT_ID": "x"}, "http:// or https://"),
+        ({"SESSION_DAYS": "0"}, "SESSION_DAYS"),
+    ],
+)
+def test_rejects_half_configured_login(env: dict[str, str], message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        Settings.from_env(env)
 
 
 def test_reads_numbers() -> None:

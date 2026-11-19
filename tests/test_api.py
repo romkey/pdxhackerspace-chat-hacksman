@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import json
 from collections.abc import AsyncIterator, Callable
 
@@ -286,28 +285,6 @@ def test_chat_endpoint_returns_502_when_llm_fails(
         response = client.post("/api/chat", json={"question": "ping"})
     assert response.status_code == 502
     assert response.json()["detail"] == "model transport failed"
-
-
-def test_optional_basic_auth_protects_routes(make_client: MakeClient) -> None:
-    token = base64.b64encode(b"alice:wonderland").decode("ascii")
-    headers = {"Authorization": f"Basic {token}"}
-    wrong = base64.b64encode(b"alice:nope").decode("ascii")
-
-    password = "wonderland"  # noqa: S105 - a dummy credential for this test
-    with make_client(basic_auth_username="alice", basic_auth_password=password) as client:
-        unauthorized = client.get("/api/settings")
-        assert unauthorized.status_code == 401
-        assert unauthorized.headers.get("www-authenticate") == 'Basic realm="Chat Hacksman"'
-        assert client.get("/").status_code == 401
-        assert client.get("/static/app.js").status_code == 401
-        assert client.get("/api/settings", headers={"Authorization": "Bearer x"}).status_code == 401
-        assert (
-            client.get("/api/settings", headers={"Authorization": f"Basic {wrong}"}).status_code
-            == 401
-        )
-        assert client.get("/api/settings", headers=headers).status_code == 200
-        assert client.get("/health").status_code == 200
-        assert client.get("/healthz").status_code == 200
 
 
 def test_root_serves_the_ui(make_client: MakeClient) -> None:

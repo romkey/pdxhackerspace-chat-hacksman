@@ -37,7 +37,13 @@ REMOVED_VARIABLES: dict[str, str] = {
     "RAG_TOP_K_CALIBRE": "RAG_CANDIDATES and RAG_TOP_N",
     "RERANK_CANDIDATES": "RAG_CANDIDATES",
     "RERANK_TOP_N": "RAG_TOP_N",
+    # 0.11.0: a login page replaced HTTP basic auth.
+    "BASIC_AUTH_USERNAME": "LOCAL_LOGIN_USERNAME (or OIDC_ISSUER for single sign-on)",
+    "BASIC_AUTH_PASSWORD": "LOCAL_LOGIN_PASSWORD",
 }
+
+DEFAULT_OIDC_LOGIN_LABEL = "Login via Authentik"
+DEFAULT_OIDC_SCOPES = "openid profile email"
 
 DEFAULT_COLLECTIONS: tuple[str, ...] = ("hs_member", "hs_catalog")
 
@@ -270,13 +276,32 @@ class Settings:
     # Merged into every chat request body, e.g. to turn reasoning off.
     llm_extra_body: dict[str, Any] = field(default_factory=dict)
     default_system_prompt: str = DEFAULT_SYSTEM_PROMPT
-    basic_auth_username: str | None = None
-    basic_auth_password: str | None = None
+    # The one local account; both or neither.
+    local_login_username: str | None = None
+    local_login_password: str | None = None
+    # OpenID Connect single sign-on (Authentik or any other provider).
+    oidc_issuer: str | None = None
+    oidc_client_id: str | None = None
+    oidc_client_secret: str | None = None
+    oidc_scopes: str = DEFAULT_OIDC_SCOPES
+    # Unset: built from the request, /auth/oidc/callback on this app.
+    oidc_redirect_uri: str | None = None
+    oidc_login_label: str = DEFAULT_OIDC_LOGIN_LABEL
+    session_days: int = 30
     sentry_dsn: str | None = None
 
     @property
-    def basic_auth_enabled(self) -> bool:
-        return bool(self.basic_auth_username and self.basic_auth_password)
+    def local_login_enabled(self) -> bool:
+        return bool(self.local_login_username and self.local_login_password)
+
+    @property
+    def oidc_enabled(self) -> bool:
+        return bool(self.oidc_issuer and self.oidc_client_id)
+
+    @property
+    def login_required(self) -> bool:
+        """Whether anything but the health checks and login pages needs a login."""
+        return self.local_login_enabled or self.oidc_enabled
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Settings:
@@ -295,6 +320,15 @@ class Settings:
         tiers = _list(env, "RAG_ALLOWED_TIERS", cls.rag_allowed_tiers)
         if "admin" in (tier.lower() for tier in tiers):
             raise ConfigError("RAG_ALLOWED_TIERS must never include admin")
+
+        local_username = _optional(env, "LOCAL_LOGIN_USERNAME")
+        local_password = _optional(env, "LOCAL_LOGIN_PASSWORD")
+        if bool(local_username) != bool(local_password):
+            raise ConfigError("Set both LOCAL_LOGIN_USERNAME and LOCAL_LOGIN_PASSWORD, or neither")
+        oidc_issuer = _optional_url(env, "OIDC_ISSUER")
+        oidc_client_id = _optional(env, "OIDC_CLIENT_ID")
+        if bool(oidc_issuer) != bool(oidc_client_id):
+            raise ConfigError("Set both OIDC_ISSUER and OIDC_CLIENT_ID, or neither")
 
         embedding_model = env.get("EMBEDDING_MODEL", "").strip() or cls.embedding_model
         prefix_text = env.get("EMBEDDING_QUERY_PREFIX")
@@ -362,7 +396,14 @@ class Settings:
             default_system_prompt=(
                 env.get("DEFAULT_SYSTEM_PROMPT", "").strip() or cls.default_system_prompt
             ),
-            basic_auth_username=_optional(env, "BASIC_AUTH_USERNAME"),
-            basic_auth_password=_optional(env, "BASIC_AUTH_PASSWORD"),
+            local_login_username=local_username,
+            local_login_password=local_password,
+            oidc_issuer=oidc_issuer,
+            oidc_client_id=oidc_client_id,
+            oidc_client_secret=_optional(env, "OIDC_CLIENT_SECRET"),
+            oidc_scopes=env.get("OIDC_SCOPES", "").strip() or cls.oidc_scopes,
+            oidc_redirect_uri=_optional_url(env, "OIDC_REDIRECT_URI"),
+            oidc_login_label=env.get("OIDC_LOGIN_LABEL", "").strip() or cls.oidc_login_label,
+            session_days=_int(env, "SESSION_DAYS", cls.session_days, minimum=1),
             sentry_dsn=_optional(env, "SENTRY_DSN"),
         )

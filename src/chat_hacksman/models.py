@@ -55,6 +55,11 @@ class MetaResponse(BaseModel):
     repo_url: str
 
 
+class WhoAmIResponse(BaseModel):
+    login_required: bool
+    username: str | None = None
+
+
 class EventRecord(BaseModel):
     event_id: int
     slug: str

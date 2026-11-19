@@ -14,9 +14,28 @@ as unset.
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` |
 | `CHAT_HACKSMAN_DB_PATH` | `data/chat_hacksman.db` (`/data/chat_hacksman.db` in the image) | SQLite database: settings, chat history, feedback, feed events |
 | `REPO_URL` | `https://github.com/romkey/pdxhackerspace-chat-hacksman` | Link shown in the UI |
-| `BASIC_AUTH_USERNAME` | unset | With `BASIC_AUTH_PASSWORD`, turns on HTTP basic auth for everything but `/health` and `/healthz` |
-| `BASIC_AUTH_PASSWORD` | unset | Secret. See `BASIC_AUTH_USERNAME` |
 | `SENTRY_DSN` | unset | Secret. Sentry DSN; set to report errors to Sentry |
+
+## Login
+
+With a local account, single sign-on, or both, everything but `/health`
+and `/healthz` needs a login: pages redirect to `/login`, API calls get
+401. With neither, the app is open to anyone who can reach it (a warning
+is logged). Sessions are stored in the database (a hash of the cookie), so
+restarts don't log anyone out. `BASIC_AUTH_USERNAME` and
+`BASIC_AUTH_PASSWORD` are no longer used; setting either stops the app.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `LOCAL_LOGIN_USERNAME` | unset | With `LOCAL_LOGIN_PASSWORD`, the one local account. Set both or neither |
+| `LOCAL_LOGIN_PASSWORD` | unset | Secret. See `LOCAL_LOGIN_USERNAME` |
+| `OIDC_ISSUER` | unset | With `OIDC_CLIENT_ID`, turns on OpenID Connect single sign-on. The issuer URL (its `/.well-known/openid-configuration` is read), or that discovery URL itself. Authentik: `https://<authentik>/application/o/<slug>/` |
+| `OIDC_CLIENT_ID` | unset | The client ID from the provider |
+| `OIDC_CLIENT_SECRET` | unset | Secret. The client secret, for a confidential client (sent as `client_secret_post`); unset for a public client (PKCE only) |
+| `OIDC_SCOPES` | `openid profile email` | Scopes asked for; must include `openid` |
+| `OIDC_REDIRECT_URI` | built from the request | The callback URL registered with the provider, `https://<this app>/auth/oidc/callback`. Set it behind a proxy that doesn't pass the original host and scheme |
+| `OIDC_LOGIN_LABEL` | `Login via Authentik` | The single sign-on button's text. With both logins on, the local one is under a "Local login" disclosure below it |
+| `SESSION_DAYS` | `30` | Days a login lasts |
 
 ## Topics feed
 

@@ -16,7 +16,6 @@ ESPHome device); pass each with --canary.
 """
 
 import argparse
-import base64
 import calendar
 import json
 import sys
@@ -82,20 +81,23 @@ def golden_failures(item: dict[str, Any], response: dict[str, Any], today: date)
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--url", default="http://localhost:8000")
-    parser.add_argument("--user", help="NAME:PASSWORD for basic auth")
+    parser.add_argument("--user", help="NAME:PASSWORD of the local login account")
     parser.add_argument("--canary", action="append", default=[])
     parser.add_argument("--min-recall", type=float, default=0.0)
     args = parser.parse_args()
 
-    headers = {}
-    if args.user:
-        headers["Authorization"] = "Basic " + base64.b64encode(args.user.encode()).decode()
     golden = json.loads((EVALS / "golden.json").read_text())
     redteam = json.loads((EVALS / "redteam.json").read_text())
     today = date.today()  # noqa: DTZ011 - the open house date is local.
     failed = False
 
-    with httpx.Client(base_url=args.url, headers=headers, timeout=300) as client:
+    with httpx.Client(base_url=args.url, timeout=300) as client:
+        if args.user:
+            name, _, password = args.user.partition(":")
+            login = client.post("/login", data={"username": name, "password": password})
+            if login.status_code != 303:
+                print(f"login as {name!r} failed: HTTP {login.status_code}")
+                return 1
         recalls: list[float] = []
         for item in golden["questions"]:
             response = ask(client, item["question"])
