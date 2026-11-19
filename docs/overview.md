@@ -22,6 +22,8 @@ API, an optional reranker, Qdrant, the topics/events JSON feed, SQLite (local fi
 - `src/chat_hacksman/topics.py`: `TopicsService`: fetch and cache the feed.
 - `src/chat_hacksman/models.py`: pydantic models for the API.
 - `src/chat_hacksman/static/`: browser UI (plain HTML and JS).
+  `markdown.js` renders answers safely (DOM nodes, no HTML strings); its tests
+  (`tests/test_markdown.py`) run it under Node.
 - `evals/`, `scripts/run-evals.py`: golden set and red-team prompts against a live bot.
 - `tests/`: pytest; `conftest.py` has `make_client` (app with a temp DB) and
   `mock_http` (fakes every httpx call).

@@ -770,7 +770,11 @@ function sourceLabel(chunk) {
   return label;
 }
 
-function renderSources(turn) {
+function sourceId(turnIndex, n) {
+  return `turn-${turnIndex}-source-${n}`;
+}
+
+function renderSources(turn, turnIndex) {
   const list = document.createElement("ol");
   list.className = "turn-sources";
   for (const n of turn.citations || []) {
@@ -780,6 +784,7 @@ function renderSources(turn) {
     }
     const li = document.createElement("li");
     li.value = n;
+    li.id = sourceId(turnIndex, n);
     const href = safeHref((chunk.metadata || {}).url || "");
     if (href) {
       const link = document.createElement("a");
@@ -809,22 +814,29 @@ function renderConversation() {
     box.append(empty);
     return;
   }
-  for (const turn of conversation) {
+  conversation.forEach((turn, turnIndex) => {
     const item = document.createElement("div");
     item.className = "turn";
     const question = document.createElement("p");
     question.className = "turn-question";
     question.textContent = turn.question;
-    const answer = document.createElement("p");
+    const answer = document.createElement("div");
     answer.className = "turn-answer";
-    answer.textContent = turn.answer || (turn.pending ? "…" : "");
+    if (turn.answer) {
+      const cited = new Set(turn.citations || []);
+      const citeHref = (n) =>
+        cited.has(n) && (turn.sources || [])[n - 1] ? `#${sourceId(turnIndex, n)}` : null;
+      answer.append(renderMarkdown(turn.answer, { citeHref }));
+    } else if (turn.pending) {
+      answer.textContent = "…";
+    }
     item.append(question, answer);
-    const sources = renderSources(turn);
+    const sources = renderSources(turn, turnIndex);
     if (sources) {
       item.append(sources);
     }
     box.append(item);
-  }
+  });
   box.scrollTop = box.scrollHeight;
 }
 
