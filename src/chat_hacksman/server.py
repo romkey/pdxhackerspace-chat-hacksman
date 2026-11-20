@@ -3,11 +3,10 @@
 create_app() builds it from Settings; nothing here reads the environment.
 """
 
-import base64
-import binascii
+import hashlib
 import json
 import logging
-import secrets
+import re
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
@@ -17,15 +16,31 @@ from time import perf_counter
 
 # Any: feed payloads and chat metrics are untyped JSON.
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from chat_hacksman import __version__
+from chat_hacksman.auth import (
+    SESSION_COOKIE,
+    OidcClient,
+    OidcError,
+    hash_token,
+    local_login_valid,
+    login_page,
+    new_session_token,
+    safe_next,
+)
 from chat_hacksman.config import Settings
 from chat_hacksman.llm import LlmError, LlmResult, LlmService, StreamState, citations
 from chat_hacksman.models import (
@@ -49,6 +64,7 @@ from chat_hacksman.models import (
     UnansweredGroup,
     UnansweredQuestion,
     UnansweredReport,
+    WhoAmIResponse,
 )
 from chat_hacksman.rag import RagService
 from chat_hacksman.rerank import Reranker
@@ -58,7 +74,10 @@ from chat_hacksman.topics import TopicsFetchError, TopicsService
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
-PUBLIC_PATHS = frozenset({"/health", "/healthz"})
+# Reachable without logging in.
+PUBLIC_PATHS = frozenset(
+    {"/health", "/healthz", "/login", "/logout", "/auth/oidc/login", "/auth/oidc/callback"}
+)
 
 
 @dataclass(slots=True)
@@ -127,6 +146,31 @@ def build_reranker(settings: Settings) -> Reranker | None:
         timeout_seconds=settings.rerank_timeout_seconds,
         context_length=settings.rerank_context_length,
     )
+
+
+def _is_https(request: Request) -> bool:
+    forwarded = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+    return request.url.scheme == "https" or forwarded == "https"
+
+
+def _external_url(request: Request, url: str) -> str:
+    """url as the browser sees it: https when a TLS proxy says so."""
+    if _is_https(request) and url.startswith("http://"):
+        return "https://" + url.removeprefix("http://")
+    return url
+
+
+def asset_version() -> str:
+    """A hash of the UI's scripts, so a changed script is never served from cache."""
+    digest = hashlib.sha256()
+    for path in sorted(STATIC_DIR.glob("*.js")):
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
+def _index_html() -> str:
+    page = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    return re.sub(r'(\.js)\?v=[^"]*"', rf'\1?v={asset_version()}"', page)
 
 
 def _client_ip_from_request(request: Request) -> str:
@@ -302,32 +346,6 @@ def _topics(context: list[ContextChunk]) -> list[str]:
     return list(topics)
 
 
-def basic_auth_valid(settings: Settings, authorization_header: str | None) -> bool:
-    if not settings.basic_auth_enabled:
-        return True
-    if not authorization_header:
-        return False
-    try:
-        scheme, encoded = authorization_header.split(" ", 1)
-    except ValueError:
-        return False
-    if scheme.lower() != "basic":
-        return False
-    try:
-        decoded = base64.b64decode(encoded.strip(), validate=True).decode("utf-8")
-    except binascii.Error, UnicodeDecodeError:
-        return False
-    if ":" not in decoded:
-        return False
-    username, password = decoded.split(":", 1)
-    return bool(
-        settings.basic_auth_username
-        and settings.basic_auth_password
-        and secrets.compare_digest(username, settings.basic_auth_username)
-        and secrets.compare_digest(password, settings.basic_auth_password)
-    )
-
-
 def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
     """The app, with its routes bound to these settings and services."""
     svc = services or build_services(settings)
@@ -351,10 +369,20 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         )
     else:
         logger.info("Reranking is off; set RERANK_URL to turn it on")
-    if bool(config.basic_auth_username) ^ bool(config.basic_auth_password):
+    oidc = (
+        OidcClient(
+            issuer=config.oidc_issuer,
+            client_id=config.oidc_client_id,
+            client_secret=config.oidc_client_secret,
+            scopes=config.oidc_scopes,
+        )
+        if config.oidc_issuer and config.oidc_client_id
+        else None
+    )
+    if not config.login_required:
         logger.warning(
-            "Basic auth partially configured; set both BASIC_AUTH_USERNAME and "
-            "BASIC_AUTH_PASSWORD to enable authentication."
+            "No login is configured, so anyone who can reach the app can use it; set "
+            "LOCAL_LOGIN_USERNAME and LOCAL_LOGIN_PASSWORD, or OIDC_ISSUER and OIDC_CLIENT_ID"
         )
 
     app = FastAPI(title="Chat Hacksman", version=__version__)
@@ -371,31 +399,133 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         allowed = set(config.rag_collections)
         return [collection for collection in enabled if collection in allowed]
 
+    def current_user(request: Request) -> str | None:
+        token = request.cookies.get(SESSION_COOKIE)
+        return storage.get_login_session(hash_token(token)) if token else None
+
+    def render_login(
+        next_path: str, error: str | None = None, status_code: int = 200, local_open: bool = False
+    ) -> HTMLResponse:
+        page = login_page(
+            oidc_label=config.oidc_login_label if oidc else None,
+            local_enabled=config.local_login_enabled,
+            next_path=next_path,
+            error=error,
+            local_open=local_open,
+        )
+        return HTMLResponse(page, status_code=status_code)
+
+    def logged_in(request: Request, username: str, next_path: str) -> Response:
+        """A redirect to next_path that sets a new session cookie."""
+        token = new_session_token()
+        max_age = config.session_days * 86400
+        storage.create_login_session(
+            hash_token(token), username, datetime.now(UTC) + timedelta(seconds=max_age)
+        )
+        response = RedirectResponse(next_path, status_code=303)
+        response.set_cookie(
+            SESSION_COOKIE,
+            token,
+            max_age=max_age,
+            httponly=True,
+            samesite="lax",
+            secure=_is_https(request),
+        )
+        return response
+
     @app.middleware("http")
-    async def optional_basic_auth(
+    async def require_login(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        if not config.basic_auth_enabled:
+        if not config.login_required:
             return await call_next(request)
         if request.url.path in PUBLIC_PATHS or request.method == "OPTIONS":
             return await call_next(request)
-        if basic_auth_valid(config, request.headers.get("Authorization")):
+        if current_user(request) is not None:
             return await call_next(request)
-        logger.warning(
-            "Unauthorized request blocked path=%s method=%s client_ip=%s",
-            request.url.path,
-            request.method,
-            _client_ip_from_request(request),
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"detail": "Not logged in"}, status_code=401)
+        next_path = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+        return RedirectResponse("/login?" + urlencode({"next": next_path}), status_code=303)
+
+    @app.get("/login", response_model=None)
+    async def get_login(request: Request, next: str | None = None) -> Response:
+        next_path = safe_next(next)
+        if not config.login_required or current_user(request) is not None:
+            return RedirectResponse(next_path, status_code=303)
+        return render_login(next_path)
+
+    @app.post("/login", response_model=None)
+    async def post_login(request: Request) -> Response:
+        form = parse_qs((await request.body()).decode("utf-8", errors="replace"))
+        next_path = safe_next(form.get("next", ["/"])[0])
+        username = form.get("username", [""])[0]
+        password = form.get("password", [""])[0]
+        if not config.local_login_enabled:
+            return render_login(next_path, "Local login is turned off.", 403)
+        if not local_login_valid(
+            config.local_login_username, config.local_login_password, username, password
+        ):
+            logger.warning("Failed local login client_ip=%s", _client_ip_from_request(request))
+            return render_login(next_path, "Wrong username or password.", 401, local_open=True)
+        logger.info("Local login succeeded")
+        return logged_in(request, username, next_path)
+
+    @app.get("/auth/oidc/login", response_model=None)
+    async def oidc_login(request: Request, next: str | None = None) -> Response:
+        next_path = safe_next(next)
+        if oidc is None:
+            return render_login(next_path, "Single sign-on is turned off.", 404)
+        redirect_uri = config.oidc_redirect_uri or _external_url(
+            request, str(request.url_for("oidc_callback"))
         )
-        return Response(
-            content="Unauthorized",
-            status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="Chat Hacksman"'},
-        )
+        try:
+            url = await oidc.authorization_url(redirect_uri, next_path)
+        except OidcError as exc:
+            logger.warning("OIDC login failed to start: %s", exc)
+            return render_login(next_path, "Single sign-on is unavailable right now.", 502)
+        return RedirectResponse(url, status_code=303)
+
+    @app.get("/auth/oidc/callback", response_model=None)
+    async def oidc_callback(
+        request: Request,
+        state: str = "",
+        code: str = "",
+        error: str | None = None,
+        error_description: str | None = None,
+    ) -> Response:
+        if oidc is None:
+            return render_login("/", "Single sign-on is turned off.", 404)
+        if error:
+            logger.warning("OIDC provider refused the login: %s %s", error, error_description)
+            return render_login("/", "The single sign-on provider refused the login.", 401)
+        try:
+            username, next_path = await oidc.finish(state, code)
+        except OidcError as exc:
+            logger.warning("OIDC login failed: %s", exc)
+            # The reason goes to the log only, not to the browser.
+            return render_login("/", "Single sign-on failed; try again.", 401)
+        logger.info("OIDC login succeeded")
+        return logged_in(request, username, next_path)
+
+    @app.post("/logout", response_model=None)
+    async def logout(request: Request) -> Response:
+        token = request.cookies.get(SESSION_COOKIE)
+        if token:
+            storage.delete_login_session(hash_token(token))
+        response = RedirectResponse("/login" if config.login_required else "/", status_code=303)
+        response.delete_cookie(SESSION_COOKIE, httponly=True, samesite="lax")
+        return response
+
+    @app.get("/api/whoami", response_model=WhoAmIResponse)
+    async def whoami(request: Request) -> WhoAmIResponse:
+        return WhoAmIResponse(login_required=config.login_required, username=current_user(request))
+
+    index_html = _index_html()
 
     @app.get("/")
-    async def root() -> FileResponse:
-        return FileResponse(STATIC_DIR / "index.html")
+    async def root() -> HTMLResponse:
+        return HTMLResponse(index_html)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

@@ -150,6 +150,17 @@ class Storage:
                 )
                 """
             )
+            # Logged-in browsers: a hash of each session cookie, never the cookie.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS login_sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                )
+                """
+            )
             # Version 1 is the schema above, which older databases reach through
             # CREATE TABLE IF NOT EXISTS and _ensure_chat_history_prompt_id_column.
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
@@ -228,6 +239,29 @@ class Storage:
         )
         row_id = cursor.lastrowid
         return int(row_id) if row_id is not None else 0
+
+    def create_login_session(self, token_hash: str, username: str, expires_at: datetime) -> None:
+        now = datetime.now(UTC)
+        with self._connect() as conn:
+            conn.execute("DELETE FROM login_sessions WHERE expires_at <= ?", (now.isoformat(),))
+            conn.execute(
+                "INSERT INTO login_sessions (token_hash, username, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?)",
+                (token_hash, username, now.isoformat(), expires_at.isoformat()),
+            )
+
+    def get_login_session(self, token_hash: str) -> str | None:
+        """The username of an unexpired session, or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT username FROM login_sessions WHERE token_hash = ? AND expires_at > ?",
+                (token_hash, datetime.now(UTC).isoformat()),
+            ).fetchone()
+        return str(row["username"]) if row else None
+
+    def delete_login_session(self, token_hash: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM login_sessions WHERE token_hash = ?", (token_hash,))
 
     def get_settings(self) -> AppSettings:
         with self._connect() as conn:

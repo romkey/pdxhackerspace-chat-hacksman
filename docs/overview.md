@@ -5,13 +5,17 @@ RAG pipeline's member collections in Qdrant (`hs_member`, `hs_catalog`), with ci
 It follows plans 00 (shared architecture) and 21 (chatbots) of the RAG pipeline.
 **Runs as:** HTTP service (FastAPI + uvicorn) on port 8000; `chat-hacksman`.
 **Talks to:** an OpenAI-compatible chat API (`LLM_URL`), an OpenAI-compatible embeddings
-API, an optional reranker, Qdrant, the topics/events JSON feed, SQLite (local file), optionally Sentry.
+API, an optional reranker, Qdrant, the topics/events JSON feed, SQLite (local file), optionally
+an OpenID Connect provider (Authentik) and Sentry.
 
 ## Files
 
 - `src/chat_hacksman/__main__.py`: command line, logging, Sentry, uvicorn.
 - `src/chat_hacksman/config.py`: `Settings` from environment variables; query prefixes.
-- `src/chat_hacksman/server.py`: `create_app(settings)`; every HTTP endpoint; the answer
+- `src/chat_hacksman/auth.py`: login: the local account check, `OidcClient` (OpenID
+  Connect code flow with PKCE), the login page.
+- `src/chat_hacksman/server.py`: `create_app(settings)`; every HTTP endpoint; the login
+  middleware and routes; the answer
   pipeline (`prepare`: rewrite and retrieve; `finish`: check citations and log).
 - `src/chat_hacksman/rag.py`: `RagService`: embed, hybrid dense + BM25 search with RRF,
   tier/stale/superseded filter, rerank; `select_chunks`: the authority pass.
@@ -37,6 +41,8 @@ API, an optional reranker, Qdrant, the topics/events JSON feed, SQLite (local fi
 - Tests make no real network calls; fake httpx with `mock_http`.
 - Tier is enforced by what the bot can read (its collections and Qdrant key) and the
   `tier` filter, never by the prompt alone. Chats are logged without identity.
-- Not done yet: member-manager login (basic auth for now), realtime tools (plan 11),
+- Login: one local account and/or OIDC single sign-on (Authentik); sessions in SQLite.
+  The username is never stored with chats.
+- Not done yet: member-manager login, realtime tools (plan 11),
   entity routing filters.
 - Rules: https://github.com/romkey/python-ai-rules/blob/main/RULES.md

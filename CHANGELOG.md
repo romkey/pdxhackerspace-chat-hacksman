@@ -7,6 +7,21 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+### Added
+
+- Login page with OpenID Connect single sign-on (`OIDC_ISSUER`,
+  `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, e.g. Authentik) and one
+  local account (`LOCAL_LOGIN_USERNAME`, `LOCAL_LOGIN_PASSWORD`). The
+  button reads `OIDC_LOGIN_LABEL` (default "Login via Authentik"); the local
+  form is under a "Local login" disclosure. Sessions last `SESSION_DAYS`
+  and survive restarts. The UI footer shows who is logged in, with a
+  logout button.
+
+### Removed
+
+- HTTP basic auth. `BASIC_AUTH_USERNAME` and `BASIC_AUTH_PASSWORD` now stop
+  the app with a message naming their replacements.
+
 ## [0.10.1] - 2026-11-19
 
 ### Changed

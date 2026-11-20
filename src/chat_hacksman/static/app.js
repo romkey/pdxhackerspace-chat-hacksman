@@ -1,5 +1,16 @@
 const el = (id) => document.getElementById(id);
 
+// When the session runs out, an API call answers 401: go to the login page.
+const originalFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+  const response = await originalFetch(...args);
+  const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
+  if (response.status === 401 && url.startsWith("/api/")) {
+    window.location.assign("/login?next=" + encodeURIComponent(window.location.pathname));
+  }
+  return response;
+};
+
 const fields = {
   llmServer: el("llm-server"),
   modelSelect: el("model-select"),
@@ -1147,6 +1158,24 @@ async function loadMeta() {
   }
 }
 
+async function loadWhoAmI() {
+  try {
+    const response = await fetch("/api/whoami");
+    if (!response.ok) {
+      return;
+    }
+    const who = await response.json();
+    const status = el("login-status");
+    const user = el("login-user");
+    if (status && user && who.username) {
+      user.textContent = who.username;
+      status.hidden = false;
+    }
+  } catch (err) {
+    showStatus(`Login status unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 function bindClick(id, handler) {
   const node = el(id);
   if (!node) {
@@ -1176,6 +1205,7 @@ async function bootstrap() {
   renderMetrics();
   renderPerformanceChart();
   await loadMeta();
+  await loadWhoAmI();
   await checkHealth();
   try {
     await loadLlmStatus();

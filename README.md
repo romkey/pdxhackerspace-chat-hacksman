@@ -70,12 +70,16 @@ If Qdrant or the embedding server is unreachable, nothing is found and the
 bot says so; if the reranker is, the search order is used; if Qdrant can't
 do BM25 inference, dense search alone is used.
 
-HTTP API (all under optional basic auth except the health checks):
+HTTP API (everything but the health checks and login pages needs a login
+when one is configured; see [Login](docs/configuration.md#login)):
 
 | Endpoint | What it does |
 |----------|--------------|
 | `GET /healthz`, `GET /health` | Health check (`/healthz` includes the version) |
 | `GET /`, `/static/...` | The UI |
+| `GET`/`POST /login`, `POST /logout` | Login page (single sign-on button, local account) and logout |
+| `GET /auth/oidc/login`, `/auth/oidc/callback` | OpenID Connect single sign-on |
+| `GET /api/whoami` | Whether a login is required, and who is logged in |
 | `POST /api/chat` | Ask a question: `{"question", "history", "temporary_chat", "stream"}`; with `stream`, newline-delimited JSON `delta` events then `done` |
 | `GET`/`PUT /api/settings` | Model, system prompt, tweaks, enabled collections |
 | `GET /api/rag/collections` | Configured and enabled collections |
