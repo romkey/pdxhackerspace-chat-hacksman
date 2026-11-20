@@ -231,6 +231,42 @@ def test_oidc_rejects_untrustworthy_id_tokens(
     assert "client_secret" not in provider.token_requests[0]
 
 
+@pytest.mark.parametrize(
+    ("response", "logged"),
+    [
+        (
+            httpx.Response(
+                400, json={"error": "invalid_client", "error_description": "Client ID Error"}
+            ),
+            "HTTP 400 invalid_client: Client ID Error (check OIDC_CLIENT_ID and "
+            "OIDC_CLIENT_SECRET)",
+        ),
+        (httpx.Response(400, json={"error": "invalid_grant"}), "invalid_grant (the code was"),
+        (httpx.Response(400, json=["odd"]), 'HTTP 400 ["odd"]'),
+        (httpx.Response(502, text="bad gateway"), "HTTP 502 bad gateway"),
+    ],
+)
+def test_oidc_token_errors_are_logged_with_the_reason(
+    make_client: MakeClient,
+    mock_http: MockHttp,
+    caplog: pytest.LogCaptureFixture,
+    response: httpx.Response,
+    logged: str,
+) -> None:
+    provider = FakeProvider()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return response if request.url.path == "/token" else provider.handler(request)
+
+    mock_http(handler)
+    with make_client(oidc_issuer=ISSUER, oidc_client_id=CLIENT_ID) as client:
+        state = _start_sso(client, provider)
+        page = client.get(f"/auth/oidc/callback?state={state}&code=abc")
+    assert page.status_code == 401
+    assert "Single sign-on failed" in page.text
+    assert logged in caplog.text
+
+
 def test_oidc_provider_errors(make_client: MakeClient, mock_http: MockHttp) -> None:
     mock_http(lambda request: httpx.Response(500))
     with make_client(oidc_issuer=ISSUER, oidc_client_id=CLIENT_ID) as client:
