@@ -169,7 +169,7 @@ class HistoryRecord(BaseModel):
     topics: list[str] = Field(default_factory=list)
     # None for chats saved before this was recorded.
     answered: bool | None = None
-    # Milliseconds per stage, `total` last; empty for chats saved before 0.12.
+    # Milliseconds per stage, `total` last; empty for chats saved before 0.11.1.
     timings: dict[str, float] = Field(default_factory=dict)
 
 
