@@ -25,6 +25,11 @@ described by their git tags and commit messages.
 - Database schema version 4: `chat_history.timings_json` and the
   `chat_timing_stats` and `chat_timing_counts` tables. Older databases are
   migrated on start.
+### Fixed
+
+- A refused OIDC token request now logs the provider's error and
+  description (for example `invalid_client`) and what to check, instead of
+  only "400 Bad Request".
 
 ## [0.11.0] - 2026-11-20
 

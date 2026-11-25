@@ -186,7 +186,11 @@ class OidcClient:
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.post(str(metadata["token_endpoint"]), data=form)
-                response.raise_for_status()
+                if response.is_error:
+                    raise OidcError(
+                        f"the token request failed: HTTP {response.status_code} "
+                        f"{_token_error(response)}"
+                    )
                 tokens = response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise OidcError(f"the token request failed: {exc}") from exc
@@ -209,6 +213,32 @@ class OidcClient:
             raise OidcError("the ID token has expired")
         if claims.get("nonce") != nonce:
             raise OidcError("the ID token's nonce doesn't match")
+
+
+# What a token endpoint's error codes usually mean here (RFC 6749 5.2).
+TOKEN_ERROR_HINTS = {
+    "invalid_client": "check OIDC_CLIENT_ID and OIDC_CLIENT_SECRET",
+    "unauthorized_client": "check OIDC_CLIENT_ID and OIDC_CLIENT_SECRET",
+    "invalid_grant": (
+        "the code was already used or expired, or the redirect URI or PKCE "
+        "verifier doesn't match the authorization request"
+    ),
+}
+
+
+def _token_error(response: httpx.Response) -> str:
+    """The provider's error and description, and what to check, for the log."""
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text[:300]
+    if not isinstance(body, dict):
+        return response.text[:300]
+    error = str(body.get("error", "unknown error"))
+    description = body.get("error_description")
+    text = f"{error}: {description}" if description else error
+    hint = TOKEN_ERROR_HINTS.get(error)
+    return f"{text} ({hint})" if hint else text
 
 
 def username_from_claims(claims: dict[str, Any]) -> str:
