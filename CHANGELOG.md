@@ -7,6 +7,8 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-11-25
+
 ### Added
 
 - The `llm` timing is split into the phases of a streamed answer, which add
