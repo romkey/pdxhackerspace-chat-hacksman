@@ -27,6 +27,7 @@ const fields = {
   responseLoading: el("response-loading"),
   metrics: el("metrics"),
   performanceChart: el("performance-chart"),
+  timingAverages: el("timing-averages"),
   history: el("history"),
   feedbackList: el("feedback-list"),
   feedbackUp: el("feedback-up"),
@@ -336,6 +337,131 @@ function renderMetrics() {
   ].join("\n");
 }
 
+// What each timing stage is, for the per-answer line and the averages table.
+const STAGE_LABELS = {
+  rewrite: "rewrite",
+  embed: "embed",
+  qdrant: "qdrant",
+  rerank: "rerank",
+  select: "select",
+  events: "events",
+  llm: "llm",
+  first_token: "first token",
+  finish: "finish",
+  total: "total",
+};
+
+function stageLabel(stage) {
+  if (stage.startsWith("qdrant:")) {
+    return `  ${stage.slice("qdrant:".length)}`;
+  }
+  return STAGE_LABELS[stage] || stage;
+}
+
+function formatMs(ms) {
+  if (typeof ms !== "number") {
+    return "n/a";
+  }
+  return ms >= 1000 ? `${(ms / 1000).toFixed(2)} s` : `${Math.round(ms)} ms`;
+}
+
+// One line for a turn: "rewrite 120 ms · embed 30 ms · qdrant 45 ms (hs_member 25 ms) · ...".
+function timingSummary(timings) {
+  const entries = Object.entries(timings || {});
+  if (!entries.length) {
+    return "";
+  }
+  const perCollection = entries.filter(([stage]) => stage.startsWith("qdrant:"));
+  return entries
+    .filter(([stage]) => !stage.startsWith("qdrant:"))
+    .map(([stage, ms]) => {
+      let text = `${STAGE_LABELS[stage] || stage} ${formatMs(ms)}`;
+      if (stage === "qdrant" && perCollection.length > 1) {
+        const parts = perCollection.map(([name, value]) => `${name.slice(7)} ${formatMs(value)}`);
+        text += ` (${parts.join(", ")})`;
+      }
+      return text;
+    })
+    .join(" · ");
+}
+
+let timingStats = null;
+
+function renderTimingAverages() {
+  const box = fields.timingAverages;
+  if (!box) {
+    return;
+  }
+  box.replaceChildren();
+  if (!timingStats || !timingStats.stages.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No chats timed yet.";
+    box.append(empty);
+    return;
+  }
+  const summary = document.createElement("p");
+  summary.className = "muted";
+  summary.textContent =
+    `${timingStats.chats} chat${timingStats.chats === 1 ? "" : "s"} timed` +
+    (timingStats.since ? ` since ${new Date(timingStats.since).toLocaleString()}` : "") +
+    (timingStats.errors ? `, ${timingStats.errors} failed` : "");
+  const table = document.createElement("table");
+  table.className = "timing-table";
+  const head = table.createTHead().insertRow();
+  for (const title of ["stage", "average", "min", "max", "last", "count"]) {
+    const th = document.createElement("th");
+    th.textContent = title;
+    head.append(th);
+  }
+  const body = table.createTBody();
+  for (const row of timingStats.stages) {
+    const tr = body.insertRow();
+    if (["qdrant", "rerank"].includes(row.stage)) {
+      tr.className = "timing-key";
+    }
+    const cells = [
+      stageLabel(row.stage),
+      formatMs(row.average_ms),
+      formatMs(row.min_ms),
+      formatMs(row.max_ms),
+      formatMs(row.last_ms),
+      String(row.count),
+    ];
+    for (const value of cells) {
+      tr.insertCell().textContent = value;
+    }
+  }
+  box.append(summary, table);
+}
+
+function updateTimingStats(stats) {
+  if (stats) {
+    timingStats = stats;
+    renderTimingAverages();
+  }
+}
+
+async function loadTimingStats() {
+  try {
+    const response = await fetch("/api/timings");
+    if (response.ok) {
+      updateTimingStats(await response.json());
+    }
+  } catch {
+    // Averages are optional; the chat works without them.
+  }
+}
+
+async function resetTimingStats() {
+  const response = await fetch("/api/timings", { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  updateTimingStats(await response.json());
+  showStatus("Timing averages reset.");
+}
+
 function buildSparkline(values) {
   if (!values.length) {
     return "n/a";
@@ -614,6 +740,14 @@ async function loadHistory() {
       wrapper.appendChild(perf);
     }
 
+    const timing = timingSummary(item.timings);
+    if (timing) {
+      const line = document.createElement("div");
+      line.className = "history-meta";
+      line.textContent = `⏱ ${timing}`;
+      wrapper.appendChild(line);
+    }
+
     if (typeof item.system_prompt === "string" && item.system_prompt.trim()) {
       const promptToggle = document.createElement("button");
       promptToggle.type = "button";
@@ -846,6 +980,13 @@ function renderConversation() {
     if (sources) {
       item.append(sources);
     }
+    const timing = timingSummary(turn.timings);
+    if (timing) {
+      const line = document.createElement("p");
+      line.className = "turn-timing";
+      line.textContent = `⏱ ${timing}`;
+      item.append(line);
+    }
     box.append(item);
   });
   box.scrollTop = box.scrollHeight;
@@ -889,7 +1030,7 @@ async function readChatStream(response, turn) {
         turn.answer += event.text;
         renderConversation();
       } else if (event.type === "error") {
-        throw new Error(event.detail || "The model failed.");
+        throw chatError(event.detail || "The model failed.", event);
       } else if (event.type === "done") {
         done = event;
       }
@@ -902,6 +1043,27 @@ async function readChatStream(response, turn) {
     throw new Error("The answer stopped before it finished.");
   }
   return done;
+}
+
+// An Error that carries the failed chat's timings, when the server sent them.
+function chatError(message, body) {
+  const err = new Error(message);
+  err.timings = body?.timings || null;
+  err.timingStats = body?.timing_stats || null;
+  return err;
+}
+
+async function errorFromResponse(response) {
+  const text = await response.text();
+  try {
+    const body = JSON.parse(text);
+    if (typeof body.detail === "string") {
+      return chatError(body.detail, body);
+    }
+  } catch {
+    // Not JSON: use the text as it is.
+  }
+  return new Error(text);
 }
 
 async function askQuestion() {
@@ -931,7 +1093,7 @@ async function askQuestion() {
       }),
     });
     if (!response.ok) {
-      throw new Error(await response.text());
+      throw await errorFromResponse(response);
     }
     setResponseLoading(false);
     const data = await readChatStream(response, turn);
@@ -940,6 +1102,8 @@ async function askQuestion() {
     turn.sources = data.context || [];
     turn.citations = data.citations || [];
     turn.answered = data.answered;
+    turn.timings = data.timings || null;
+    updateTimingStats(data.timing_stats);
     renderConversation();
     pulseResponsePanel();
     lastResponseForFeedback = {
@@ -989,6 +1153,8 @@ async function askQuestion() {
     // Failed turns are shown but not sent back as history.
     turn.failed = true;
     turn.answer = `Request failed: ${message}`;
+    turn.timings = err?.timings || null;
+    updateTimingStats(err?.timingStats);
     renderConversation();
     diagnosticsState.rag.lastError = message;
     diagnosticsState.rag.lastAskedAt = isoNow();
@@ -1045,6 +1211,14 @@ bindClick("delete-latest-history", async () => {
     await deleteLatestHistory();
   } catch (err) {
     showStatus(`Delete latest failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+});
+
+bindClick("reset-timing-averages", async () => {
+  try {
+    await resetTimingStats();
+  } catch (err) {
+    showStatus(`Reset timing averages failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 });
 
@@ -1204,6 +1378,7 @@ async function bootstrap() {
   renderDiagnostics();
   renderMetrics();
   renderPerformanceChart();
+  renderTimingAverages();
   await loadMeta();
   await loadWhoAmI();
   await checkHealth();
@@ -1217,6 +1392,7 @@ async function bootstrap() {
   await loadTopics();
   await loadHistory();
   await loadFeedback();
+  await loadTimingStats();
   showStatus("Ready.");
 }
 

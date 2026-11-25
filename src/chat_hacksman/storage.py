@@ -15,11 +15,14 @@ from chat_hacksman.models import (
     FeedbackRecord,
     HistoryRecord,
     OccurrenceRecord,
+    StageAverage,
+    TimingStatsResponse,
 )
+from chat_hacksman.timing import stage_sort_key
 
 # Bump when the schema changes, and migrate older databases in _init_db
 # (stored in SQLite's PRAGMA user_version).
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # DEFAULT_SYSTEM_PROMPT before 0.9.0; a saved copy of it is dropped so the
 # member bot's prompt takes over.
@@ -161,6 +164,30 @@ class Storage:
                 )
                 """
             )
+            # The running tally of chat stage timings: one row per stage,
+            # and the chat and error counts since the tally began.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_timing_stats (
+                    stage TEXT PRIMARY KEY,
+                    count INTEGER NOT NULL,
+                    total_ms REAL NOT NULL,
+                    min_ms REAL NOT NULL,
+                    max_ms REAL NOT NULL,
+                    last_ms REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_timing_counts (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    chats INTEGER NOT NULL,
+                    errors INTEGER NOT NULL,
+                    since TEXT NOT NULL
+                )
+                """
+            )
             # Version 1 is the schema above, which older databases reach through
             # CREATE TABLE IF NOT EXISTS and _ensure_chat_history_prompt_id_column.
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
@@ -168,6 +195,11 @@ class Storage:
                 self._migrate_to_openai_chat(conn)
             if version < 3:
                 self._migrate_to_answer_log(conn)
+            if version < 4:
+                # Version 4: each saved chat keeps its stage timings.
+                conn.execute(
+                    "ALTER TABLE chat_history ADD COLUMN timings_json TEXT NOT NULL DEFAULT '{}'"
+                )
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION:d}")
 
     def _migrate_to_openai_chat(self, conn: sqlite3.Connection) -> None:
@@ -362,6 +394,7 @@ class Storage:
         doc_ids: list[str] | None = None,
         topics: list[str] | None = None,
         answered: bool | None = None,
+        timings: dict[str, float] | None = None,
     ) -> int:
         created_at = datetime.now(UTC).isoformat()
         with self._connect() as conn:
@@ -381,9 +414,10 @@ class Storage:
                     prompt_id,
                     doc_ids_json,
                     topics_json,
-                    answered
+                    answered,
+                    timings_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     created_at,
@@ -399,6 +433,7 @@ class Storage:
                     json.dumps(doc_ids or []),
                     json.dumps(topics or []),
                     None if answered is None else int(answered),
+                    json.dumps(timings or {}),
                 ),
             )
             conn.commit()
@@ -424,7 +459,8 @@ class Storage:
                     config_snapshot_json,
                     doc_ids_json,
                     topics_json,
-                    answered
+                    answered,
+                    timings_json
                 FROM chat_history
                 ORDER BY id DESC
                 LIMIT ?
@@ -450,9 +486,72 @@ class Storage:
                     doc_ids=json.loads(row["doc_ids_json"]),
                     topics=json.loads(row["topics_json"]),
                     answered=None if row["answered"] is None else bool(row["answered"]),
+                    timings=json.loads(row["timings_json"]),
                 )
             )
         return records
+
+    def record_timings(self, timings: dict[str, float], *, error: bool = False) -> None:
+        """Add one chat's stage timings (milliseconds) to the running tally."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO chat_timing_counts (id, chats, errors, since)
+                VALUES (1, 1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    chats = chats + 1,
+                    errors = errors + excluded.errors
+                """,
+                (int(error), datetime.now(UTC).isoformat()),
+            )
+            conn.executemany(
+                """
+                INSERT INTO chat_timing_stats (stage, count, total_ms, min_ms, max_ms, last_ms)
+                VALUES (?, 1, ?, ?, ?, ?)
+                ON CONFLICT(stage) DO UPDATE SET
+                    count = count + 1,
+                    total_ms = total_ms + excluded.total_ms,
+                    min_ms = min(min_ms, excluded.min_ms),
+                    max_ms = max(max_ms, excluded.max_ms),
+                    last_ms = excluded.last_ms
+                """,
+                [(stage, ms, ms, ms, ms) for stage, ms in timings.items()],
+            )
+
+    def get_timing_stats(self) -> TimingStatsResponse:
+        """Average, min, max and last time per stage since the tally began."""
+        with self._connect() as conn:
+            counts = conn.execute(
+                "SELECT chats, errors, since FROM chat_timing_counts WHERE id = 1"
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT stage, count, total_ms, min_ms, max_ms, last_ms FROM chat_timing_stats"
+            ).fetchall()
+        if counts is None:
+            return TimingStatsResponse()
+        ordered = sorted(rows, key=lambda row: stage_sort_key(str(row["stage"])))
+        return TimingStatsResponse(
+            chats=counts["chats"],
+            errors=counts["errors"],
+            since=datetime.fromisoformat(counts["since"]),
+            stages=[
+                StageAverage(
+                    stage=row["stage"],
+                    count=row["count"],
+                    average_ms=round(row["total_ms"] / row["count"], 2),
+                    min_ms=round(row["min_ms"], 2),
+                    max_ms=round(row["max_ms"], 2),
+                    last_ms=round(row["last_ms"], 2),
+                )
+                for row in ordered
+            ],
+        )
+
+    def reset_timing_stats(self) -> None:
+        """Start the running tally again. Saved chats keep their own timings."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM chat_timing_stats")
+            conn.execute("DELETE FROM chat_timing_counts")
 
     def get_unanswered(self, *, since: datetime) -> list[tuple[int, datetime, str, list[str]]]:
         """(history id, time, question, topics) of chats since `since` that

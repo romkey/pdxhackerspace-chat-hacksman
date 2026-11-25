@@ -22,6 +22,8 @@ an OpenID Connect provider (Authentik) and Sentry.
 - `src/chat_hacksman/rerank.py`: `Reranker`: rerank API client (Jina/Cohere or TEI format).
 - `src/chat_hacksman/llm.py`: `ANSWERING_RULES`; `build_system_prompt` (sources as `<source>`
   data); `LlmService`: query rewrite, chat completions, streaming; `citations`.
+- `src/chat_hacksman/timing.py`: `StageTimer`: one chat's milliseconds per stage. The
+  running per-stage tally (`/api/timings`) and each saved chat's timings are in SQLite.
 - `src/chat_hacksman/storage.py`: `Storage`: SQLite schema and queries.
 - `src/chat_hacksman/topics.py`: `TopicsService`: fetch and cache the feed.
 - `src/chat_hacksman/models.py`: pydantic models for the API.

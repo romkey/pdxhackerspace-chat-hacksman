@@ -21,6 +21,7 @@ from chat_hacksman import rag as rag_module
 from chat_hacksman.models import ContextChunk
 from chat_hacksman.rag import RagService, select_chunks
 from chat_hacksman.rerank import Reranker
+from chat_hacksman.timing import StageTimer
 from tests.conftest import Handler
 
 
@@ -488,3 +489,42 @@ def test_embed_query_truncates_long_single_token_input(monkeypatch: pytest.Monke
 
     asyncio.run(service._embed_query("x" * 1000))
     assert len(captured["text"]) == 128
+
+
+def test_retrieve_times_each_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def rerank(self: Reranker, query: str, documents: list[str]) -> list[float]:
+        return [0.5 for _ in documents]
+
+    monkeypatch.setattr(Reranker, "rerank", rerank)
+    service = _service(reranker=Reranker(url="http://rerank.local", model="m"))
+    client = FakeClient({"hs_member": [_hit("member text", 0.5)], "hs_catalog": []})
+    _install(monkeypatch, service, client)
+    timer = StageTimer()
+
+    asyncio.run(service.retrieve("q", timer=timer))
+
+    assert list(timer.report()) == [
+        "embed",
+        "qdrant",
+        "qdrant:hs_catalog",
+        "qdrant:hs_member",
+        "rerank",
+        "select",
+        "total",
+    ]
+    stages = timer.stages
+    # qdrant wraps each collection's own timer.
+    assert stages["qdrant"] >= stages["qdrant:hs_member"] + stages["qdrant:hs_catalog"]
+
+
+def test_retrieve_without_candidates_skips_the_reranker_timing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(reranker=Reranker(url="http://rerank.local", model="m"))
+    _install(monkeypatch, service, FakeClient({}))
+    timer = StageTimer()
+
+    asyncio.run(service.retrieve("q", timer=timer))
+
+    assert "rerank" not in timer.stages
+    assert "qdrant" in timer.stages

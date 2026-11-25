@@ -61,6 +61,7 @@ from chat_hacksman.models import (
     OccurrenceRecord,
     RagCollectionsResponse,
     SettingsUpdate,
+    TimingStatsResponse,
     UnansweredGroup,
     UnansweredQuestion,
     UnansweredReport,
@@ -69,6 +70,7 @@ from chat_hacksman.models import (
 from chat_hacksman.rag import RagService
 from chat_hacksman.rerank import Reranker
 from chat_hacksman.storage import Storage
+from chat_hacksman.timing import EVENTS, FINISH, LLM, REWRITE, TTFT, StageTimer
 from chat_hacksman.topics import TopicsFetchError, TopicsService
 
 logger = logging.getLogger(__name__)
@@ -325,7 +327,7 @@ class Prepared:
     context: list[ContextChunk]
     rewrite_latency_ms: float
     rag_latency_ms: float
-    started: float = field(default_factory=perf_counter)
+    timer: StageTimer = field(default_factory=StageTimer)
 
 
 def _doc_ids(context: list[ContextChunk]) -> list[str]:
@@ -663,6 +665,38 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         logger.info("Deleted most recent history row count=%d", deleted_rows)
         return {"deleted_rows": deleted_rows}
 
+    @app.get("/api/timings", response_model=TimingStatsResponse)
+    async def get_timings() -> TimingStatsResponse:
+        """Average time per chat stage since the tally began (or was reset)."""
+        return storage.get_timing_stats()
+
+    @app.delete("/api/timings", response_model=TimingStatsResponse)
+    async def delete_timings() -> TimingStatsResponse:
+        """Start the tally again; saved chats keep their own timings."""
+        storage.reset_timing_stats()
+        logger.info("Reset chat timing averages")
+        return storage.get_timing_stats()
+
+    def record_timings(timer: StageTimer, error: bool = False) -> dict[str, float]:
+        """This chat's timings, after adding them to the running tally."""
+        report = timer.report()
+        storage.record_timings(report, error=error)
+        logger.info(
+            "Chat timings%s %s",
+            " (failed)" if error else "",
+            " ".join(f"{name}={ms:.0f}ms" for name, ms in report.items()),
+        )
+        return report
+
+    def failure(timer: StageTimer, detail: str) -> dict[str, Any]:
+        """The body of a failed chat: why, and how long it took."""
+        timings = record_timings(timer, error=True)
+        return {
+            "detail": detail,
+            "timings": timings,
+            "timing_stats": storage.get_timing_stats().model_dump(mode="json"),
+        }
+
     @app.get("/api/reports/unanswered", response_model=UnansweredReport)
     async def get_unanswered_report(days: int = Query(default=7, ge=1, le=365)) -> UnansweredReport:
         """Questions not answered from sources, grouped by the first topic of
@@ -707,21 +741,23 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
     async def prepare(request: ChatRequest, settings: AppSettings) -> Prepared:
         """Steps 1-4: rewrite the question with the conversation, then
         search, rerank and pick the sources."""
-        started = perf_counter()
+        timer = StageTimer()
         turns = config.chat_history_turns
         history = request.history[-turns:] if turns > 0 else []
-        search_query = await svc.llm.rewrite_query(
-            settings=settings, question=request.question, history=history
-        )
-        rewrite_latency_ms = (perf_counter() - started) * 1000.0
+        with timer.stage(REWRITE):
+            search_query = await svc.llm.rewrite_query(
+                settings=settings, question=request.question, history=history
+            )
+        rewrite_latency_ms = timer.stages[REWRITE]
         rag_started = perf_counter()
         enabled = available_collections(settings.enabled_rag_collections)
-        context = await svc.rag.retrieve(search_query, enabled_collections=enabled)
+        context = await svc.rag.retrieve(search_query, enabled_collections=enabled, timer=timer)
         # Live facts come from the events feed, not the index.
         if _is_events_schedule_query(search_query) and not any(
             chunk.metadata.get("source") == "event" for chunk in context
         ):
-            context.extend(_build_fallback_events_context(svc, limit=3))
+            with timer.stage(EVENTS):
+                context.extend(_build_fallback_events_context(svc, limit=3))
         logger.info(
             "Chat request history_turns=%d rewritten=%s sources=%d",
             len(history),
@@ -734,7 +770,7 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
             context=context,
             rewrite_latency_ms=rewrite_latency_ms,
             rag_latency_ms=(perf_counter() - rag_started) * 1000.0,
-            started=started,
+            timer=timer,
         )
 
     def finish(
@@ -744,12 +780,49 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         answer: str,
         llm_result: LlmResult | None,
     ) -> ChatResponse:
-        """Step 6 and the log: check citations, record the chat."""
+        """Step 6 and the log: check citations, then record the chat and its
+        timings. The timings stop before the database writes, so a saved
+        chat holds the same timings as the response."""
+        timer = prepared.timer
+        if llm_result is not None and llm_result.first_token_ms is not None:
+            timer.add(TTFT, llm_result.first_token_ms)
+        with timer.stage(FINISH):
+            response = _response(request, prepared, answer, llm_result)
+        response.timings = record_timings(timer)
+        response.timing_stats = storage.get_timing_stats()
+        if not request.temporary_chat:
+            context = prepared.context
+            # No identity of any kind is stored with a chat.
+            response.history_id = (
+                storage.append_history(
+                    provider="openai",
+                    model=llm_result.model if llm_result is not None else "",
+                    system_prompt=settings.system_prompt,
+                    question=request.question,
+                    answer=answer,
+                    rag_collections=[chunk.collection for chunk in context],
+                    rag_hits=len(context),
+                    config_snapshot={**settings.model_dump(), "last_metrics": response.metrics},
+                    doc_ids=_doc_ids(context),
+                    topics=_topics(context),
+                    answered=response.answered,
+                    timings=response.timings,
+                )
+                or None
+            )
+        return response
+
+    def _response(
+        request: ChatRequest,
+        prepared: Prepared,
+        answer: str,
+        llm_result: LlmResult | None,
+    ) -> ChatResponse:
         context = prepared.context
         cited = citations(answer, len(context))
         answered = bool(context) and bool(cited)
         metrics: dict[str, Any] = {
-            "total_latency_ms": round((perf_counter() - prepared.started) * 1000.0, 2),
+            "total_latency_ms": round(prepared.timer.elapsed_ms(), 2),
             "rewrite_latency_ms": round(prepared.rewrite_latency_ms, 2),
             "rag_latency_ms": round(prepared.rag_latency_ms, 2),
             "context_chunks_used": len(context),
@@ -779,23 +852,6 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
                 }
             )
         logger.info("Chat answered=%s sources=%d cited=%d", answered, len(context), len(cited))
-
-        history_id: int | None = None
-        if not request.temporary_chat:
-            # No identity of any kind is stored with a chat.
-            history_id = storage.append_history(
-                provider="openai",
-                model=llm_result.model if llm_result is not None else "",
-                system_prompt=settings.system_prompt,
-                question=request.question,
-                answer=answer,
-                rag_collections=[chunk.collection for chunk in context],
-                rag_hits=len(context),
-                config_snapshot={**settings.model_dump(), "last_metrics": metrics},
-                doc_ids=_doc_ids(context),
-                topics=_topics(context),
-                answered=answered,
-            )
         return ChatResponse(
             answer=answer,
             search_query=prepared.search_query,
@@ -803,7 +859,6 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
             citations=cited,
             answered=answered,
             metrics=metrics,
-            history_id=history_id or None,
         )
 
     async def stream_chat(
@@ -814,17 +869,18 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
 
         state = StreamState()
         try:
-            async for piece in svc.llm.chat_stream(
-                settings=settings,
-                question=request.question,
-                context=prepared.context,
-                history=prepared.history,
-                state=state,
-            ):
-                yield line({"type": "delta", "text": piece})
+            with prepared.timer.stage(LLM):
+                async for piece in svc.llm.chat_stream(
+                    settings=settings,
+                    question=request.question,
+                    context=prepared.context,
+                    history=prepared.history,
+                    state=state,
+                ):
+                    yield line({"type": "delta", "text": piece})
         except LlmError as exc:
             logger.warning("Streamed chat failed: %s", exc)
-            yield line({"type": "error", "detail": str(exc)})
+            yield line({"type": "error", **failure(prepared.timer, str(exc))})
             return
         response = finish(request, settings, prepared, "".join(state.parts), state.result)
         yield line({"type": "done", **response.model_dump(mode="json")})
@@ -847,14 +903,16 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
                 stream_chat(request, settings, prepared), media_type="application/x-ndjson"
             )
         try:
-            llm_result = await svc.llm.chat(
-                settings=settings,
-                question=request.question,
-                context=prepared.context,
-                history=prepared.history,
-            )
+            with prepared.timer.stage(LLM):
+                llm_result = await svc.llm.chat(
+                    settings=settings,
+                    question=request.question,
+                    context=prepared.context,
+                    history=prepared.history,
+                )
         except LlmError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            logger.warning("Chat failed: %s", exc)
+            return JSONResponse(failure(prepared.timer, str(exc)), status_code=502)
         response = finish(request, settings, prepared, llm_result.answer, llm_result)
         return Response(response.model_dump_json(), media_type="application/json")
 

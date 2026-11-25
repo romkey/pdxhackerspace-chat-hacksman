@@ -116,6 +116,26 @@ class ChatRequest(BaseModel):
     stream: bool = False
 
 
+class StageAverage(BaseModel):
+    stage: str
+    # How many chats ran this stage.
+    count: int
+    average_ms: float
+    min_ms: float
+    max_ms: float
+    last_ms: float
+
+
+class TimingStatsResponse(BaseModel):
+    """Per-stage running tally, kept in the database, since `since` (the
+    first chat timed, or the first after a reset)."""
+
+    chats: int = 0
+    errors: int = 0
+    since: datetime | None = None
+    stages: list[StageAverage] = Field(default_factory=list)
+
+
 class ChatResponse(BaseModel):
     answer: str
     # The standalone query searched for (the question, rewritten with the history).
@@ -127,6 +147,10 @@ class ChatResponse(BaseModel):
     answered: bool = False
     metrics: dict[str, Any] = Field(default_factory=dict)
     history_id: int | None = None
+    # Milliseconds per stage of this chat, in run order, `total` last.
+    timings: dict[str, float] = Field(default_factory=dict)
+    # Running averages over every chat timed (see TimingStatsResponse).
+    timing_stats: TimingStatsResponse | None = None
 
 
 class HistoryRecord(BaseModel):
@@ -145,6 +169,8 @@ class HistoryRecord(BaseModel):
     topics: list[str] = Field(default_factory=list)
     # None for chats saved before this was recorded.
     answered: bool | None = None
+    # Milliseconds per stage, `total` last; empty for chats saved before 0.11.1.
+    timings: dict[str, float] = Field(default_factory=dict)
 
 
 class FeedbackCreateRequest(BaseModel):
