@@ -14,6 +14,7 @@ from chat_hacksman import server as server_module
 from chat_hacksman.llm import LlmError, LlmResult, LlmService, StreamState
 from chat_hacksman.models import AppSettings, ChatTurn, ContextChunk
 from chat_hacksman.rag import RagService
+from chat_hacksman.timing import StageTimer
 from tests.conftest import Handler, MakeClient
 
 MockHttp = Callable[[Handler], None]
@@ -78,9 +79,15 @@ def fake_retrieve(
     found = FOUND if chunks is None else chunks
 
     async def retrieve(
-        self: RagService, query: str, enabled_collections: list[str] | None = None
+        self: RagService,
+        query: str,
+        enabled_collections: list[str] | None = None,
+        timer: StageTimer | None = None,
     ) -> list[ContextChunk]:
         queries.append(query)
+        if timer is not None:
+            timer.add("qdrant", 5.0)
+            timer.add("rerank", 7.0)
         return list(found)
 
     monkeypatch.setattr(RagService, "retrieve", retrieve)
@@ -284,7 +291,12 @@ def test_chat_endpoint_returns_502_when_llm_fails(
     with make_client() as client:
         response = client.post("/api/chat", json={"question": "ping"})
     assert response.status_code == 502
-    assert response.json()["detail"] == "model transport failed"
+    body = response.json()
+    assert body["detail"] == "model transport failed"
+    assert list(body["timings"])[-1] == "total"
+    assert body["timings"]["qdrant"] == 5.0
+    assert "llm" in body["timings"]
+    assert body["timing_stats"]["errors"] == 1
 
 
 def test_root_serves_the_ui(make_client: MakeClient) -> None:
@@ -506,9 +518,13 @@ def test_streamed_chat_reports_model_errors(
     with make_client() as client:
         response = client.post("/api/chat", json={"question": "PPE?", "stream": True})
         assert client.get("/api/history?limit=1").json() == []
-    assert [json.loads(line) for line in response.text.splitlines()] == [
-        {"type": "error", "detail": "model down"}
-    ]
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert len(events) == 1
+    assert events[0]["type"] == "error"
+    assert events[0]["detail"] == "model down"
+    assert {"rewrite", "qdrant", "rerank", "llm", "total"} <= set(events[0]["timings"])
+    assert events[0]["timing_stats"]["chats"] == 1
+    assert events[0]["timing_stats"]["errors"] == 1
 
 
 def test_reports_list_unanswered_questions_and_negative_feedback(
@@ -564,3 +580,64 @@ def test_unanswered_report_groups_by_topic(
     assert [(group["topic"], len(group["questions"])) for group in report["groups"]] == [
         ("safety", 2)
     ]
+
+
+def test_chat_reports_stage_timings_and_running_averages(
+    make_client: MakeClient, monkeypatch: pytest.MonkeyPatch, fake_llm: list[list[ContextChunk]]
+) -> None:
+    fake_retrieve(monkeypatch)
+    with make_client() as client:
+        first = client.post("/api/chat", json={"question": "PPE?"}).json()
+        second = client.post("/api/chat", json={"question": "PPE?"}).json()
+        stats = client.get("/api/timings").json()
+        reset = client.delete("/api/timings").json()
+        after = client.get("/api/timings").json()
+        saved = client.get("/api/history?limit=2").json()
+
+    timings = first["timings"]
+    assert list(timings) == ["rewrite", "qdrant", "rerank", "llm", "finish", "total"]
+    assert timings["qdrant"] == 5.0
+    assert timings["total"] >= timings["llm"]
+    assert first["timing_stats"]["chats"] == 1
+    assert second["timing_stats"]["chats"] == 2
+
+    assert stats["chats"] == 2
+    assert stats["errors"] == 0
+    by_stage = {row["stage"]: row for row in stats["stages"]}
+    assert [row["stage"] for row in stats["stages"]] == list(timings)
+    assert by_stage["qdrant"] == {
+        "stage": "qdrant",
+        "count": 2,
+        "average_ms": 5.0,
+        "min_ms": 5.0,
+        "max_ms": 5.0,
+        "last_ms": 5.0,
+    }
+    assert reset == after == {"chats": 0, "errors": 0, "since": None, "stages": []}
+    # A saved chat keeps the timings it was answered with.
+    assert saved[0]["timings"] == second["timings"]
+    assert saved[1]["timings"] == timings
+    assert "timings" not in saved[0]["config_snapshot"]["last_metrics"]
+
+
+def test_streamed_chat_done_event_carries_timings(
+    make_client: MakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_retrieve(monkeypatch)
+
+    async def chat_stream(
+        self: LlmService, *, state: StreamState, **kwargs: Any
+    ) -> AsyncIterator[str]:  # Any: chat_stream's keywords.
+        yield "ok [1]"
+        state.parts.append("ok [1]")
+        state.result = llm_result()
+        state.result.first_token_ms = 12.5
+
+    monkeypatch.setattr(LlmService, "chat_stream", chat_stream)
+    with make_client() as client:
+        response = client.post("/api/chat", json={"question": "PPE?", "stream": True})
+    done = [json.loads(line) for line in response.text.splitlines()][-1]
+    assert done["type"] == "done"
+    assert done["timings"]["first_token"] == 12.5
+    assert list(done["timings"])[-1] == "total"
+    assert done["timing_stats"]["chats"] == 1

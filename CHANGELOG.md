@@ -7,6 +7,25 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+### Added
+
+- Stage timings for every chat: rewrite, embed, each Qdrant search (in all
+  and per collection), rerank, select, events, LLM (and time to first
+  token), finish and total. The response, the streamed `done` event and a
+  failed chat's error (streamed `error` event or 502 body) carry them as
+  `timings`; the UI shows them under each answer or error.
+- Running per-stage averages (with min, max, last and count), kept in the
+  database so they survive restarts, in the UI under "Stage Timing
+  Averages" and at `GET /api/timings`; `DELETE /api/timings` resets them.
+- Each saved chat keeps its stage timings (`timings` in `/api/history`,
+  shown in the History tab). Chats saved before this have none.
+
+### Changed
+
+- Database schema version 4: `chat_history.timings_json` and the
+  `chat_timing_stats` and `chat_timing_counts` tables. Older databases are
+  migrated on start.
+
 ## [0.11.0] - 2026-11-20
 
 ### Added

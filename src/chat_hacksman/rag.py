@@ -35,6 +35,7 @@ from qdrant_client.http.models import (
 
 from chat_hacksman.models import ContextChunk
 from chat_hacksman.rerank import Reranker
+from chat_hacksman.timing import EMBED, QDRANT, RERANK, SELECT, StageTimer
 
 logger = logging.getLogger(__name__)
 
@@ -396,9 +397,17 @@ class RagService:
         return vector_dim
 
     async def retrieve(
-        self, query: str, enabled_collections: list[str] | None = None
+        self,
+        query: str,
+        enabled_collections: list[str] | None = None,
+        timer: StageTimer | None = None,
     ) -> list[ContextChunk]:
-        """The chunks to answer `query` from: best first, at most top_n."""
+        """The chunks to answer `query` from: best first, at most top_n.
+
+        `timer` gets the embed, qdrant (and qdrant:<collection>), rerank and
+        select stages.
+        """
+        timer = timer if timer is not None else StageTimer()
         target = enabled_collections if enabled_collections is not None else self.collections
         available = set(self.collections)
         target_collections = [collection for collection in target if collection in available]
@@ -406,7 +415,8 @@ class RagService:
             logger.info("Skipping retrieval because no collections are enabled")
             return []
         logger.info("Running retrieval across collections=%s", ",".join(target_collections))
-        vector = await self._embed_query(query)
+        with timer.stage(EMBED):
+            vector = await self._embed_query(query)
         if vector is None:
             logger.warning("Skipping retrieval because query embedding failed")
             return []
@@ -417,31 +427,9 @@ class RagService:
         for collection in target_collections:
             if self._is_missing(collection):
                 continue
-            expected_dim = self._get_collection_vector_dim(client, collection)
-            if self._is_missing(collection):
-                continue
-            if expected_dim is not None and expected_dim != len(vector):
-                logger.warning(
-                    "Skipping collection=%s due to vector dimension mismatch "
-                    "(expected=%d, got=%d). "
-                    "Use a matching embedding model or rebuild that collection.",
-                    collection,
-                    expected_dim,
-                    len(vector),
-                )
-                continue
-            try:
-                hits = self._search_collection(client, collection, vector, query, query_filter)
-            except Exception as exc:
-                if _is_not_found(exc):
-                    self._mark_missing(collection)
-                    continue
-                logger.warning(
-                    "Qdrant search failed collection=%s error_type=%s error=%s",
-                    collection,
-                    type(exc).__name__,
-                    exc,
-                )
+            with timer.stage(QDRANT), timer.stage(f"{QDRANT}:{collection}"):
+                hits = self._query_collection(client, collection, vector, query, query_filter)
+            if hits is None:
                 continue
             logger.info("Qdrant search for %s found %d hits", collection, len(hits))
             for hit in hits:
@@ -452,14 +440,52 @@ class RagService:
 
         candidates.sort(key=lambda chunk: chunk.score, reverse=True)
         if self.reranker is not None and candidates:
-            reranked = await self._rerank(self.reranker, query, candidates)
+            with timer.stage(RERANK):
+                reranked = await self._rerank(self.reranker, query, candidates)
             if reranked is not None:
                 candidates = reranked
             else:
                 logger.warning("Reranking failed; using search order")
-        chosen = select_chunks(candidates, self.top_n, self.authority_weight)
+        with timer.stage(SELECT):
+            chosen = select_chunks(candidates, self.top_n, self.authority_weight)
         logger.info("Retrieval chose %d of %d candidate chunks", len(chosen), len(candidates))
         return chosen
+
+    def _query_collection(
+        self,
+        client: QdrantClient,
+        collection: str,
+        vector: list[float],
+        query: str,
+        query_filter: Filter,
+    ) -> list[Any] | None:
+        """The collection's hits; None if it's missing, mismatched or failed."""
+        expected_dim = self._get_collection_vector_dim(client, collection)
+        if self._is_missing(collection):
+            return None
+        if expected_dim is not None and expected_dim != len(vector):
+            logger.warning(
+                "Skipping collection=%s due to vector dimension mismatch "
+                "(expected=%d, got=%d). "
+                "Use a matching embedding model or rebuild that collection.",
+                collection,
+                expected_dim,
+                len(vector),
+            )
+            return None
+        try:
+            return self._search_collection(client, collection, vector, query, query_filter)
+        except Exception as exc:
+            if _is_not_found(exc):
+                self._mark_missing(collection)
+                return None
+            logger.warning(
+                "Qdrant search failed collection=%s error_type=%s error=%s",
+                collection,
+                type(exc).__name__,
+                exc,
+            )
+            return None
 
     async def _rerank(
         self, reranker: Reranker, query: str, chunks: list[ContextChunk]

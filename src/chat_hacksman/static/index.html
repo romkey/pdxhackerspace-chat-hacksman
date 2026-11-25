@@ -191,6 +191,12 @@
       .turn-sources li:target { color: #f3f4f6; }
       .turn-sources { margin: 0.4rem 0 0; padding-left: 1.4rem; font-size: 0.85rem; color: #9ca3af; }
       .turn-sources a { color: #93c5fd; }
+      .turn-timing { margin: 0.35rem 0 0; font-size: 0.78rem; color: #9ca3af; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: normal; }
+      .timing-table { border-collapse: collapse; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; margin-bottom: 0.6rem; }
+      .timing-table th, .timing-table td { border: 1px solid #374151; padding: 0.2rem 0.6rem; text-align: right; white-space: pre; }
+      .timing-table th:first-child, .timing-table td:first-child { text-align: left; }
+      .timing-table th { background: #111827; }
+      .timing-table tr.timing-key td { color: #fde68a; }
       .footer { margin-top: auto; border-top: 1px solid #374151; padding: 0.75rem 1rem; color: #9ca3af; font-size: 0.85rem; text-align: center; }
       .footer a { color: #93c5fd; text-decoration: none; }
       .footer a:hover { text-decoration: underline; }
@@ -319,6 +325,11 @@
             <button id="clear-performance-trend" type="button">Clear Trend</button>
           </div>
           <div id="metrics"></div>
+          <div class="button-row">
+            <h4>Stage Timing Averages</h4>
+            <button id="reset-timing-averages" type="button">Reset Averages</button>
+          </div>
+          <div id="timing-averages"></div>
           <h4>Performance Trend (last 20 queries)</h4>
           <div id="performance-chart"></div>
           <div class="row">

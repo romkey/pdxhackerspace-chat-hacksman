@@ -80,7 +80,7 @@ when one is configured; see [Login](docs/configuration.md#login)):
 | `GET`/`POST /login`, `POST /logout` | Login page (single sign-on button, local account) and logout |
 | `GET /auth/oidc/login`, `/auth/oidc/callback` | OpenID Connect single sign-on |
 | `GET /api/whoami` | Whether a login is required, and who is logged in |
-| `POST /api/chat` | Ask a question: `{"question", "history", "temporary_chat", "stream"}`; with `stream`, newline-delimited JSON `delta` events then `done` |
+| `POST /api/chat` | Ask a question: `{"question", "history", "temporary_chat", "stream"}`; with `stream`, newline-delimited JSON `delta` events then `done` (or `error`); every answer or error carries `timings` per stage |
 | `GET`/`PUT /api/settings` | Model, system prompt, tweaks, enabled collections |
 | `GET /api/rag/collections` | Configured and enabled collections |
 | `GET /api/models` | Models the LLM server offers, and the `LLM_MODEL` default |
@@ -90,6 +90,7 @@ when one is configured; see [Login](docs/configuration.md#login)):
 | `GET`/`POST /api/feedback` | Thumbs up/down with notes |
 | `GET /api/reports/unanswered?days=7` | Questions not answered from sources, grouped by topic |
 | `GET /api/reports/negative-feedback?days=7` | Thumbs-down answers with their source documents |
+| `GET`/`DELETE /api/timings` | Average time per chat stage (kept in the database); reset them |
 | `GET /api/meta` | Name, version, repo link |
 
 The UI offers the standard sampling options: `temperature`, `top_p`,

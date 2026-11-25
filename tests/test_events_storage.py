@@ -3,7 +3,7 @@ import sqlite3
 from pathlib import Path
 
 from chat_hacksman.models import AppSettings
-from chat_hacksman.storage import OLD_DEFAULT_SYSTEM_PROMPT, Storage
+from chat_hacksman.storage import OLD_DEFAULT_SYSTEM_PROMPT, SCHEMA_VERSION, Storage
 
 
 def test_storage_upsert_and_get_events(tmp_path: Path) -> None:
@@ -133,7 +133,7 @@ def test_version_1_settings_lose_the_old_provider_fields(tmp_path: Path) -> None
         stored = json.loads(conn.execute("SELECT payload_json FROM app_settings").fetchone()[0])
     conn.close()
     assert "llm_base_url_history" not in tables
-    assert version == 3
+    assert version == SCHEMA_VERSION
     assert "provider" not in stored
     assert "num_ctx" not in stored["tweaks"]
 
@@ -150,6 +150,7 @@ def test_version_2_drops_the_old_default_prompt_and_adds_answer_columns(tmp_path
         conn.execute("ALTER TABLE chat_history DROP COLUMN doc_ids_json")
         conn.execute("ALTER TABLE chat_history DROP COLUMN topics_json")
         conn.execute("ALTER TABLE chat_history DROP COLUMN answered")
+        conn.execute("ALTER TABLE chat_history DROP COLUMN timings_json")
         payload = {"system_prompt": OLD_DEFAULT_SYSTEM_PROMPT, "enabled_rag_collections": ["slack"]}
         conn.execute("INSERT INTO app_settings VALUES (1, ?, 'then')", (json.dumps(payload),))
         conn.execute("PRAGMA user_version = 2")
@@ -171,3 +172,70 @@ def test_version_2_drops_the_old_default_prompt_and_adds_answer_columns(tmp_path
     )
     (record,) = storage.get_history()
     assert (record.doc_ids, record.topics, record.answered) == ([], [], None)
+
+
+def _append(storage: Storage, **extra: object) -> int:
+    return storage.append_history(
+        provider="openai",
+        model="m",
+        system_prompt="p",
+        question="q",
+        answer="a",
+        rag_collections=[],
+        rag_hits=0,
+        config_snapshot={},
+        **extra,  # type: ignore[arg-type]
+    )
+
+
+def test_version_3_adds_timings_to_saved_chats(tmp_path: Path) -> None:
+    db_path = tmp_path / "v3.db"
+    _append(Storage(db_path=db_path, default_settings=AppSettings(system_prompt="x")))
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("ALTER TABLE chat_history DROP COLUMN timings_json")
+        conn.execute("DROP TABLE chat_timing_stats")
+        conn.execute("DROP TABLE chat_timing_counts")
+        conn.execute("PRAGMA user_version = 3")
+    conn.close()
+
+    storage = Storage(db_path=db_path, default_settings=AppSettings(system_prompt="x"))
+    _append(storage, timings={"qdrant": 12.5, "total": 40.0})
+    newer, older = storage.get_history()
+    assert newer.timings == {"qdrant": 12.5, "total": 40.0}
+    assert older.timings == {}
+    assert storage.get_timing_stats().chats == 0
+
+
+def test_timing_tally_survives_a_restart_and_resets(tmp_path: Path) -> None:
+    db_path = tmp_path / "timings.db"
+    settings = AppSettings(system_prompt="x")
+    storage = Storage(db_path=db_path, default_settings=settings)
+    assert storage.get_timing_stats().model_dump() == {
+        "chats": 0,
+        "errors": 0,
+        "since": None,
+        "stages": [],
+    }
+    storage.record_timings({"qdrant": 10.0, "total": 30.0})
+    storage.record_timings({"rerank": 5.0, "qdrant": 20.0, "total": 40.0}, error=True)
+
+    stats = Storage(db_path=db_path, default_settings=settings).get_timing_stats()
+
+    assert (stats.chats, stats.errors) == (2, 1)
+    assert stats.since is not None
+    assert [row.stage for row in stats.stages] == ["qdrant", "rerank", "total"]
+    qdrant = stats.stages[0]
+    assert (qdrant.count, qdrant.average_ms, qdrant.min_ms, qdrant.max_ms, qdrant.last_ms) == (
+        2,
+        15.0,
+        10.0,
+        20.0,
+        20.0,
+    )
+    assert stats.stages[1].count == 1
+
+    _append(storage, timings={"total": 1.0})
+    storage.reset_timing_stats()
+    assert storage.get_timing_stats().chats == 0
+    # Saved chats keep their own timings.
+    assert storage.get_history()[0].timings == {"total": 1.0}
