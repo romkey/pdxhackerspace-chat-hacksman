@@ -71,6 +71,10 @@ class LlmResult:
     provider_metrics: dict[str, Any]
     # Milliseconds to the first streamed token; None when not streamed.
     first_token_ms: float | None = None
+    # Where llm_latency_ms went, in milliseconds (see stream_phases):
+    # prompt, thinking and writing when streamed; server_prompt when the
+    # server reports its own prompt time (llama-server).
+    phases: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -172,6 +176,31 @@ def empty_answer_error(finish_reason: Any, reasoned: bool, max_tokens: int) -> L
     return LlmError(f"The model returned an empty answer (finish_reason={finish_reason}).")
 
 
+def stream_phases(
+    *,
+    total_ms: float,
+    first_output_ms: float | None,
+    first_reasoning_ms: float | None,
+    first_token_ms: float | None,
+) -> dict[str, float]:
+    """Split a streamed answer's time into phases that add up to total_ms.
+
+    prompt: until the model's first output of any kind (sending the request,
+    loading the model, reading the prompt). thinking: from its first
+    reasoning output to the first answer token. writing: from the first
+    answer token to the end.
+    """
+    if first_output_ms is None:
+        return {}
+    phases = {"prompt": first_output_ms}
+    answer_start = first_token_ms if first_token_ms is not None else total_ms
+    if first_reasoning_ms is not None and answer_start > first_reasoning_ms:
+        phases["thinking"] = answer_start - first_reasoning_ms
+    if first_token_ms is not None:
+        phases["writing"] = total_ms - first_token_ms
+    return phases
+
+
 def _result(
     *,
     answer: str,
@@ -180,6 +209,7 @@ def _result(
     finish_reason: Any,
     started: float,
     first_token_ms: float | None = None,
+    phases: dict[str, float] | None = None,
 ) -> LlmResult:
     llm_latency_ms = (perf_counter() - started) * 1000.0
     raw_usage = data.get("usage")
@@ -200,6 +230,10 @@ def _result(
         "prompt_eval_duration_ms": _ms(timings.get("prompt_ms")),
         "eval_duration_ms": eval_ms,
     }
+    all_phases = dict(phases or {})
+    server_prompt_ms = provider_metrics["prompt_eval_duration_ms"]
+    if server_prompt_ms is not None:
+        all_phases["server_prompt"] = server_prompt_ms
     tokens_per_second = None
     if output_tokens:
         seconds = (eval_ms if eval_ms else llm_latency_ms) / 1000.0
@@ -215,6 +249,7 @@ def _result(
         tokens_per_second=tokens_per_second,
         provider_metrics=provider_metrics,
         first_token_ms=first_token_ms,
+        phases=all_phases,
     )
 
 
@@ -405,6 +440,8 @@ class LlmService:
         last: dict[str, Any] = {}
         finish_reason: Any = None
         first_token_ms: float | None = None
+        first_output_ms: float | None = None
+        first_reasoning_ms: float | None = None
         reasoned = False
         try:
             async with (
@@ -438,11 +475,19 @@ class LlmService:
                         continue
                     finish_reason = first.get("finish_reason") or finish_reason
                     delta = first.get("delta")
-                    reasoned = reasoned or bool(_reasoning(delta))
+                    now_ms = (perf_counter() - started) * 1000.0
+                    if _reasoning(delta):
+                        reasoned = True
+                        if first_reasoning_ms is None:
+                            first_reasoning_ms = now_ms
+                        if first_output_ms is None:
+                            first_output_ms = now_ms
                     piece = delta.get("content") if isinstance(delta, dict) else None
                     if isinstance(piece, str) and piece:
                         if first_token_ms is None:
-                            first_token_ms = (perf_counter() - started) * 1000.0
+                            first_token_ms = now_ms
+                        if first_output_ms is None:
+                            first_output_ms = now_ms
                         state.parts.append(piece)
                         yield piece
         except httpx.HTTPError as exc:
@@ -458,6 +503,12 @@ class LlmService:
             finish_reason=finish_reason,
             started=started,
             first_token_ms=first_token_ms,
+            phases=stream_phases(
+                total_ms=(perf_counter() - started) * 1000.0,
+                first_output_ms=first_output_ms,
+                first_reasoning_ms=first_reasoning_ms,
+                first_token_ms=first_token_ms,
+            ),
         )
 
     async def rewrite_query(

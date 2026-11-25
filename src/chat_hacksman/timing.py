@@ -22,14 +22,20 @@ TTFT = "first_token"
 FINISH = "finish"
 TOTAL = "total"
 STAGE_ORDER = (REWRITE, EMBED, QDRANT, RERANK, SELECT, EVENTS, LLM, TTFT, FINISH, TOTAL)
+# Parts of llm (`llm:<phase>`), in the order they happen; see llm.stream_phases.
+LLM_PHASE_ORDER = ("prompt", "server_prompt", "thinking", "writing")
 
 
-def stage_sort_key(name: str) -> tuple[int, str]:
-    """Known stages in run order; `qdrant:<collection>` right after `qdrant`;
-    unknown ones just before `total`."""
-    base = name.split(":", 1)[0]
+def stage_sort_key(name: str) -> tuple[int, int, str]:
+    """Known stages in run order, each followed by its `<stage>:<part>`
+    parts (llm's in LLM_PHASE_ORDER, others by name); unknown stages just
+    before `total`."""
+    base, _, part = name.partition(":")
     rank = STAGE_ORDER.index(base) if base in STAGE_ORDER else len(STAGE_ORDER) - 1
-    return (rank, name)
+    if not part:
+        return (rank, -1, name)
+    sub = LLM_PHASE_ORDER.index(part) if base == LLM and part in LLM_PHASE_ORDER else 0
+    return (rank, sub, name)
 
 
 @dataclass(slots=True)

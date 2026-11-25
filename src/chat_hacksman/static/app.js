@@ -351,9 +351,25 @@ const STAGE_LABELS = {
   total: "total",
 };
 
+// Parts of a stage ("qdrant:hs_member", "llm:thinking"), by their part name.
+const PART_LABELS = {
+  "llm:prompt": "prompt",
+  // Part of prompt, as the LLM server measured it: not a phase of its own.
+  "llm:server_prompt": "server",
+  "llm:thinking": "thinking",
+  "llm:writing": "writing",
+};
+
+function partLabel(stage) {
+  return PART_LABELS[stage] || stage.slice(stage.indexOf(":") + 1);
+}
+
 function stageLabel(stage) {
-  if (stage.startsWith("qdrant:")) {
-    return `  ${stage.slice("qdrant:".length)}`;
+  if (stage === "llm:server_prompt") {
+    return `    ${partLabel(stage)}`;
+  }
+  if (stage.includes(":")) {
+    return `  ${partLabel(stage)}`;
   }
   return STAGE_LABELS[stage] || stage;
 }
@@ -365,20 +381,32 @@ function formatMs(ms) {
   return ms >= 1000 ? `${(ms / 1000).toFixed(2)} s` : `${Math.round(ms)} ms`;
 }
 
-// One line for a turn: "rewrite 120 ms · embed 30 ms · qdrant 45 ms (hs_member 25 ms) · ...".
+// One line for a turn: "... · qdrant 45 ms (hs_catalog 20 ms, hs_member 25 ms) ·
+// llm 20.1 s (prompt 1.2 s [server 0.9 s], thinking 8.8 s, writing 10.1 s) · ...".
+// A single collection's part repeats its stage, so it's left out; the
+// server's own prompt time is part of prompt, so it's shown inside it.
 function timingSummary(timings) {
   const entries = Object.entries(timings || {});
   if (!entries.length) {
     return "";
   }
-  const perCollection = entries.filter(([stage]) => stage.startsWith("qdrant:"));
   return entries
-    .filter(([stage]) => !stage.startsWith("qdrant:"))
+    .filter(([stage]) => !stage.includes(":"))
     .map(([stage, ms]) => {
       let text = `${STAGE_LABELS[stage] || stage} ${formatMs(ms)}`;
-      if (stage === "qdrant" && perCollection.length > 1) {
-        const parts = perCollection.map(([name, value]) => `${name.slice(7)} ${formatMs(value)}`);
-        text += ` (${parts.join(", ")})`;
+      const parts = entries.filter(
+        ([name]) => name.startsWith(`${stage}:`) && name !== "llm:server_prompt"
+      );
+      if (parts.length > 1 || (parts.length === 1 && stage !== "qdrant")) {
+        const serverPrompt = timings["llm:server_prompt"];
+        const described = parts.map(([name, value]) => {
+          const server =
+            name === "llm:prompt" && typeof serverPrompt === "number"
+              ? ` [server ${formatMs(serverPrompt)}]`
+              : "";
+          return `${partLabel(name)} ${formatMs(value)}${server}`;
+        });
+        text += ` (${described.join(", ")})`;
       }
       return text;
     })

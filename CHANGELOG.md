@@ -7,6 +7,16 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+### Added
+
+- The `llm` timing is split into the phases of a streamed answer, which add
+  up to it: `llm:prompt` (until the model's first output: sending the
+  request, loading the model, reading the prompt), `llm:thinking` (a
+  reasoning model's thinking, until the first answer token) and
+  `llm:writing` (the answer itself). `llm:server_prompt` is the prompt time
+  llama-server reports, part of `llm:prompt`. The UI shows them inside the
+  `llm` stage and in the averages table.
+
 ## [0.11.1] - 2026-11-25
 
 ### Added
