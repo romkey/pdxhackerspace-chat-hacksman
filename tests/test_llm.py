@@ -14,6 +14,7 @@ from chat_hacksman.llm import (
     build_system_prompt,
     citations,
     format_source,
+    stream_phases,
 )
 from chat_hacksman.models import AppSettings, ChatTurn, ContextChunk, SamplingTweaks
 from tests.conftest import Handler
@@ -388,3 +389,47 @@ def test_connection_errors_are_retried(mock_http: Callable[[Handler], None]) -> 
     mock_http(lambda request: (_ for _ in ()).throw(httpx.ConnectError("refused", request=request)))
     with pytest.raises(LlmError, match="after 2 attempt"):
         asyncio.run(service.chat(settings=AppSettings(system_prompt="p"), question="q", context=[]))
+
+
+def test_stream_phases_split_the_answer_time() -> None:
+    assert stream_phases(
+        total_ms=100.0, first_output_ms=10.0, first_reasoning_ms=10.0, first_token_ms=60.0
+    ) == {"prompt": 10.0, "thinking": 50.0, "writing": 40.0}
+    # No reasoning: the wait is all prompt.
+    assert stream_phases(
+        total_ms=100.0, first_output_ms=30.0, first_reasoning_ms=None, first_token_ms=30.0
+    ) == {"prompt": 30.0, "writing": 70.0}
+    # Only reasoning, no answer: thinking runs to the end.
+    assert stream_phases(
+        total_ms=100.0, first_output_ms=5.0, first_reasoning_ms=5.0, first_token_ms=None
+    ) == {"prompt": 5.0, "thinking": 95.0}
+    assert (
+        stream_phases(
+            total_ms=100.0, first_output_ms=None, first_reasoning_ms=None, first_token_ms=None
+        )
+        == {}
+    )
+
+
+def test_chat_stream_times_prompt_thinking_and_writing(
+    mock_http: Callable[[Handler], None],
+) -> None:
+    mock_http(
+        lambda request: _sse(
+            {"choices": [{"delta": {"role": "assistant"}}]},
+            {"choices": [{"delta": {"reasoning_content": "Hmm, PPE..."}}]},
+            {"choices": [{"delta": {"content": "Glasses [1]."}, "finish_reason": "stop"}]},
+            {"timings": {"prompt_ms": 12.5, "predicted_ms": 40.0}},
+        )
+    )
+    service = LlmService(base_url="http://llm.local/v1", default_model="m")
+    state = StreamState()
+    _collect(service, state)
+    assert state.result is not None
+    phases = state.result.phases
+    assert list(phases) == ["prompt", "thinking", "writing", "server_prompt"]
+    assert phases["server_prompt"] == 12.5
+    assert state.result.first_token_ms == pytest.approx(phases["prompt"] + phases["thinking"])
+    assert sum(phases[name] for name in ("prompt", "thinking", "writing")) == pytest.approx(
+        state.result.llm_latency_ms, abs=1.0
+    )

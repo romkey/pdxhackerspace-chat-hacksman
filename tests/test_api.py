@@ -632,6 +632,7 @@ def test_streamed_chat_done_event_carries_timings(
         state.parts.append("ok [1]")
         state.result = llm_result()
         state.result.first_token_ms = 12.5
+        state.result.phases = {"prompt": 2.5, "thinking": 10.0, "writing": 30.0}
 
     monkeypatch.setattr(LlmService, "chat_stream", chat_stream)
     with make_client() as client:
@@ -639,5 +640,12 @@ def test_streamed_chat_done_event_carries_timings(
     done = [json.loads(line) for line in response.text.splitlines()][-1]
     assert done["type"] == "done"
     assert done["timings"]["first_token"] == 12.5
+    assert [name for name in done["timings"] if name.startswith("llm")] == [
+        "llm",
+        "llm:prompt",
+        "llm:thinking",
+        "llm:writing",
+    ]
+    assert done["timings"]["llm:thinking"] == 10.0
     assert list(done["timings"])[-1] == "total"
     assert done["timing_stats"]["chats"] == 1

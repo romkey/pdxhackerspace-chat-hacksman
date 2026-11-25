@@ -31,3 +31,20 @@ def test_stage_timer_times_a_block_that_raises() -> None:
     with pytest.raises(RuntimeError), timer.stage("llm"):
         raise RuntimeError("down")
     assert timer.stages["llm"] >= 0.0
+
+
+def test_llm_phases_follow_llm_in_the_order_they_happen() -> None:
+    timer = StageTimer()
+    for name in ("llm:writing", "first_token", "llm:server_prompt", "llm", "llm:thinking"):
+        timer.add(name, 1.0)
+    timer.add("llm:prompt", 1.0)
+
+    assert list(timer.report()) == [
+        "llm",
+        "llm:prompt",
+        "llm:server_prompt",
+        "llm:thinking",
+        "llm:writing",
+        "first_token",
+        "total",
+    ]

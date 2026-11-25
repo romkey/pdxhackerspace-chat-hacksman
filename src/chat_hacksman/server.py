@@ -784,8 +784,11 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         timings. The timings stop before the database writes, so a saved
         chat holds the same timings as the response."""
         timer = prepared.timer
-        if llm_result is not None and llm_result.first_token_ms is not None:
-            timer.add(TTFT, llm_result.first_token_ms)
+        if llm_result is not None:
+            if llm_result.first_token_ms is not None:
+                timer.add(TTFT, llm_result.first_token_ms)
+            for phase, ms in llm_result.phases.items():
+                timer.add(f"{LLM}:{phase}", ms)
         with timer.stage(FINISH):
             response = _response(request, prepared, answer, llm_result)
         response.timings = record_timings(timer)
