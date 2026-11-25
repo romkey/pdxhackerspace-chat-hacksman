@@ -7,6 +7,8 @@ described by their git tags and commit messages.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-25
+
 ### Added
 
 - Stage timings for every chat: rewrite, embed, each Qdrant search (in all
